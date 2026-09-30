@@ -1,0 +1,20 @@
+[
+  {
+    "name": "Aniyomi: XvXun",
+    "pkg": "eu.kanade.tachiyomi.animeextension.all.xvideosxun",
+    "apk": "aniyomi-all.xvideosxun-v14.6.apk",
+    "lang": "all",
+    "code": 6,
+    "version": "14.6",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "XvXun",
+        "lang": "all",
+        "id": "5320004989093205933",
+        "baseUrl": "https://www.xvideos.com",
+        "versionId": 1
+      }
+    ]
+  }
+]
