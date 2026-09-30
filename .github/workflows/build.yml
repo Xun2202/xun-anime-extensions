@@ -1,0 +1,92 @@
+name: Build & publish repo
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build extensions & publish repo branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare signing key
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::SIGNING_KEY secret is missing"
+            exit 1
+          fi
+          echo "$SIGNING_KEY" | base64 -d > signingkey.jks
+          chmod 600 signingkey.jks
+
+      - name: Format sources (spotlessApply)
+        run: ./gradlew spotlessApply --no-configuration-cache
+
+      - name: Build extensions
+        env:
+          ALIAS: ${{ secrets.ALIAS }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          MODULES=$(find src -mindepth 2 -maxdepth 2 -type d -printf ':src:%P:assembleRelease\n' | tr '/' ':')
+          echo "Building: $MODULES"
+          ./gradlew $MODULES
+
+      - name: Clean up signing key
+        if: always()
+        run: rm -f signingkey.jks
+
+      - name: Generate repo index
+        run: |
+          python3 ./.github/scripts/create-repo.py collect
+          INSPECTOR_LINK="$(curl -s "https://api.github.com/repos/komikku-app/aniyomi-extensions-inspector/releases/latest" | jq -r '.assets[0].browser_download_url')"
+          curl -L "$INSPECTOR_LINK" -o ./Inspector.jar
+          java -jar ./Inspector.jar "repo/apk" "output.json" "tmp"
+          python3 ./.github/scripts/create-repo.py index
+
+      - name: Upload APKs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: repo/apk/*.apk
+          retention-days: 7
+
+      - name: Publish repo branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          cd repo
+          git init -b repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Build repo from ${GITHUB_SHA::7}" -m "${COMMIT_MESSAGE:-manual}"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
