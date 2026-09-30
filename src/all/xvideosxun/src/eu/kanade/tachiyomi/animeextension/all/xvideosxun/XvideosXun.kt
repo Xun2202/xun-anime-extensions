@@ -302,6 +302,8 @@ class XvideosXun :
             episode_number = 1F
             setUrlWithoutDomain(response.request.url.toString())
             date_upload = DATE_FORMAT.tryParse(ld?.uploadDate).takeIf { it > 0 } ?: System.currentTimeMillis()
+            preview_url = ld?.thumbnailUrl?.firstOrNull()
+            summary = document.selectFirst("h2.page-title span.duration")?.text()?.trim()
         }
         return listOf(episode)
     }
@@ -478,11 +480,17 @@ class XvideosXun :
         return live.mapIndexed { index, v ->
             SEpisode.create().apply {
                 url = v.u!!.substringBefore('?')
-                val rawTitle = Parser.unescapeEntities(v.tf ?: v.t ?: v.eid, false)
-                name = if (v.d.isNullOrBlank()) rawTitle else "$rawTitle · ${v.d}"
+                name = Parser.unescapeEntities(v.tf ?: v.t ?: v.eid, false)
                 episode_number = (total - index).toFloat()
                 scanlator = v.pn
                 date_upload = v.ut?.let { it * 1000 } ?: 0L
+                // Anikku renders these as a thumbnail + subtitle line in the episode list
+                preview_url = v.i?.takeIf { it.isNotBlank() }
+                summary = listOfNotNull(
+                    v.d?.takeIf { it.isNotBlank() },
+                    v.n?.takeIf { it.isNotBlank() }?.let { "$it 观看" },
+                    v.r?.takeIf { it.isNotBlank() }?.let { "好评 $it" },
+                ).joinToString(" · ").ifBlank { null }
             }
         }
     }
@@ -627,6 +635,8 @@ class XvideosXun :
         val tf: String? = null,
         val t: String? = null,
         val d: String? = null,
+        val n: String? = null,
+        val r: String? = null,
         val pn: String? = null,
         val ut: Long? = null,
     )
