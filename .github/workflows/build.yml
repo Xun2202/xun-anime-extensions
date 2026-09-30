@@ -46,8 +46,16 @@ jobs:
           echo "$SIGNING_KEY" | base64 -d > signingkey.jks
           chmod 600 signingkey.jks
 
-      - name: Format sources (spotlessApply)
-        run: ./gradlew spotlessApply --no-configuration-cache
+      - name: Resolve extension modules
+        run: |
+          MODULES=$(find src -mindepth 2 -maxdepth 2 -type d -printf ':src:%P\n' | tr '/' ':' | tr '\n' ' ')
+          echo "MODULES=$MODULES" >> "$GITHUB_ENV"
+          echo "Extension modules: $MODULES"
+
+      - name: Format extension sources (spotlessApply)
+        run: |
+          TASKS=$(for m in $MODULES; do printf '%s:spotlessApply ' "$m"; done)
+          ./gradlew $TASKS --no-configuration-cache
 
       - name: Build extensions
         env:
@@ -55,9 +63,9 @@ jobs:
           KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          MODULES=$(find src -mindepth 2 -maxdepth 2 -type d -printf ':src:%P:assembleRelease\n' | tr '/' ':')
-          echo "Building: $MODULES"
-          ./gradlew $MODULES
+          TASKS=$(for m in $MODULES; do printf '%s:assembleRelease ' "$m"; done)
+          echo "Building: $TASKS"
+          ./gradlew $TASKS
 
       - name: Clean up signing key
         if: always()
