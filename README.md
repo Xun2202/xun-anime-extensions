@@ -16,7 +16,7 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 
 ## 扩展列表
 
-### Xvideos (Xun) — `src/all/xvideosxun`
+### XvXun（定制版 Xvideos）— `src/all/xvideosxun`
 
 相比官方仓库里的 Xvideos 扩展多出：
 

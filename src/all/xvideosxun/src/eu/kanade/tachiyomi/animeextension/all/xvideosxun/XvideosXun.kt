@@ -44,7 +44,10 @@ class XvideosXun :
     ParsedAnimeHttpLegacySource(),
     ConfigurableAnimeSource {
 
-    override val name = "Xvideos (Xun)"
+    override val name = "XvXun"
+
+    // Keep the id generated for the original name ("Xvideos (Xun)") so library entries survive the rename.
+    override val id = 5320004989093205933L
 
     override val baseUrl = "https://www.xvideos.com"
 
