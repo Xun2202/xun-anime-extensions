@@ -45,3 +45,5 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 - 改动扩展后记得把 `build.gradle` 里的 `extVersionCode` +1，否则 App 不会提示更新
 
 签名相关 secrets：`SIGNING_KEY`（base64 的 jks）、`ALIAS`、`KEY_STORE_PASSWORD`、`KEY_PASSWORD`。
+
+根目录的 `repo.json` 会被原样发布到 `repo` 分支，App 添加仓库时会读取它；`signingKeyFingerprint` 是签名证书的 SHA-256（`keytool -list -v` 里的值去掉冒号转小写），换签名密钥时必须同步更新。

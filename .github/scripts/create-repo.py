@@ -112,6 +112,9 @@ def build_index() -> None:
 
     index.sort(key=lambda x: x["pkg"])
 
+    # Repo metadata (name + signing key fingerprint); Mihon/Anikku fetch this when adding the repo.
+    shutil.copy(Path("repo.json"), REPO_DIR / "repo.json")
+
     with (REPO_DIR / "index.json").open("w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False, indent=2)
 
