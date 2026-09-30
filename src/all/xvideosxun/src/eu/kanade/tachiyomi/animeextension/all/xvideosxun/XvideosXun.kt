@@ -25,6 +25,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
@@ -86,7 +87,9 @@ class XvideosXun :
 
     // =============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/new/${page - 1}", headers)
+    // Page 1 of "Newest" is the home page; /new/0 and /new do not exist.
+    override fun latestUpdatesRequest(page: Int): Request =
+        if (page <= 1) GET("$baseUrl/", headers) else GET("$baseUrl/new/${page - 1}", headers)
 
     override fun latestUpdatesParse(response: Response): AnimesPage = parseListingPage(response)
 
@@ -116,6 +119,9 @@ class XvideosXun :
 
         filters.firstOfType<AccountFilter>()?.selectedValue?.takeIf { it.isNotBlank() }?.let { section ->
             requireLogin()
+            if (section == ACCOUNT_PLAYLISTS) {
+                return GET("$baseUrl/$ACCOUNT_PLAYLISTS", headers)
+            }
             return POST("$baseUrl/$section/$p", ajaxHeaders)
         }
 
@@ -127,6 +133,10 @@ class XvideosXun :
         filters.firstOfType<UploaderFilter>()?.state?.trim()?.takeIf { it.isNotBlank() }?.let { input ->
             val profilePath = resolveProfilePath(input)
             return GET("$baseUrl$profilePath/videos/best/$p", ajaxHeaders)
+        }
+
+        filters.firstOfType<BestMonthFilter>()?.selectedValue?.takeIf { it.isNotBlank() }?.let { month ->
+            return GET("$baseUrl/best/$month/$p", headers)
         }
 
         filters.firstOfType<CategoryFilter>()?.selectedValue?.takeIf { it.isNotBlank() }?.let { path ->
@@ -152,12 +162,21 @@ class XvideosXun :
 
     private fun parseListingPage(response: Response): AnimesPage {
         val url = response.request.url
+        if (url.encodedPath.trimStart('/') == ACCOUNT_PLAYLISTS) {
+            return parseFavoriteLists(response)
+        }
+
         val isAccountSection = url.pathSegments.first() in ACCOUNT_SECTIONS
         val document = response.asJsoup()
-        val items = document.select(LISTING_SELECTOR).map(::listingItemFromElement)
+        val items = document.select(LISTING_SELECTOR)
+            .filter { it.isVideoBlock() }
+            .map(::listingItemFromElement)
 
-        if (items.isEmpty() && isAccountSection && document.selectFirst(".empty-state-box") != null && !isLoggedIn()) {
-            throw Exception(LOGIN_HINT)
+        if (items.isEmpty() && isAccountSection) {
+            val sessionGone = document.title().contains("login", ignoreCase = true)
+            if (sessionGone || (document.selectFirst(".empty-state-box") != null && !isLoggedIn())) {
+                throw Exception(LOGIN_HINT)
+            }
         }
 
         val hasNext = document.selectFirst(NEXT_PAGE_SELECTOR) != null ||
@@ -193,6 +212,10 @@ class XvideosXun :
     // =========================== Anime Details ============================
 
     override fun animeDetailsParse(document: Document): SAnime {
+        if (document.location().isFavoriteListUrl()) {
+            return favoriteListDetails(document)
+        }
+
         val anime = SAnime.create()
         val ld = extractJsonLd(document)
 
@@ -238,6 +261,10 @@ class XvideosXun :
     // ============================== Episodes ==============================
 
     override fun episodeListParse(response: Response): List<SEpisode> {
+        if (response.request.url.toString().isFavoriteListUrl()) {
+            return favoriteListEpisodes(response)
+        }
+
         val document = response.asJsoup()
         val ld = extractJsonLd(document)
         val episode = SEpisode.create().apply {
@@ -349,6 +376,109 @@ class XvideosXun :
         author = element.selectFirst("p.metadata span.name")?.text()?.trim()
     }
 
+    /** Only keep tiles that point at a video (home page also carries channel/ad tiles). */
+    private fun Element.isVideoBlock(): Boolean {
+        val href = selectFirst("a[href]")?.attr("href") ?: return false
+        return href.contains("/video") || href.contains("/prof-video-click")
+    }
+
+    // ========================= Favorites lists ============================
+
+    private fun String.isFavoriteListUrl(): Boolean = contains("/favorite/") || contains("/playlist/")
+
+    /**
+     * Parses the account playlists page into one entry per list. Works on both server-rendered
+     * anchors and on list URLs embedded in inline JSON, since the exact markup differs per account state.
+     */
+    private fun parseFavoriteLists(response: Response): AnimesPage {
+        val html = response.body.string()
+        val document = Jsoup.parse(html, response.request.url.toString())
+        if (document.title().contains("login", ignoreCase = true)) throw Exception(LOGIN_HINT)
+        val lists = linkedMapOf<String, SAnime>()
+
+        // 1) Real anchors
+        for (a in document.select("a[href*=/favorite/], a[href*=/playlist/]")) {
+            val match = FAVORITE_PATH_REGEX.find(a.attr("href")) ?: continue
+            val id = match.groupValues[2]
+            if (lists.containsKey(id)) continue
+            val tile = a.closest(".thumb-block, .favlist-elem, li, article") ?: a
+            val name = tile.selectFirst("p.title, .title, .name, h3, h4")?.text()?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: a.attr("title").takeIf { it.isNotBlank() }
+                ?: a.text().trim().takeIf { it.isNotBlank() }
+                ?: match.groupValues[3].humanizeSlug()
+            val img = tile.selectFirst("img")
+            lists[id] = SAnime.create().apply {
+                url = match.value
+                title = name
+                thumbnail_url = img?.attr("data-src")?.takeIf { it.isNotBlank() } ?: img?.attr("src")
+            }
+        }
+
+        // 2) URLs inside inline JSON / scripts
+        for (match in FAVORITE_PATH_REGEX.findAll(html.replace("\\/", "/"))) {
+            val id = match.groupValues[2]
+            if (lists.containsKey(id)) continue
+            lists[id] = SAnime.create().apply {
+                url = match.value
+                title = match.groupValues[3].humanizeSlug()
+            }
+        }
+
+        if (lists.isEmpty()) {
+            if (!isLoggedIn()) throw Exception(LOGIN_HINT)
+            throw Exception("没有找到任何收藏夹/播放列表（或页面结构已变化）")
+        }
+        return AnimesPage(lists.values.toList(), false)
+    }
+
+    private fun favoriteListDetails(document: Document): SAnime = SAnime.create().apply {
+        val heading = document.selectFirst("h1, h2.page-title, .page-title")?.ownText()?.trim()
+        title = heading?.takeIf { it.isNotBlank() }
+            ?: document.title().substringBefore(" - ").trim().ifBlank { "收藏夹" }
+        val count = document.select(LISTING_SELECTOR).count { it.isVideoBlock() }
+        val first = document.select(LISTING_SELECTOR).firstOrNull { it.isVideoBlock() }?.selectFirst("img")
+        thumbnail_url = first?.attr("data-src")?.takeIf { it.isNotBlank() } ?: first?.attr("src")
+        description = "XVideos 收藏夹 / 播放列表\n每个“剧集”对应列表里的一个视频（本页 $count 个，全部列表见剧集列表）"
+        status = SAnime.ONGOING
+        author = document.selectFirst("li.main-uploader span.name, .profile-name, .uploader-tag .name")?.text()?.trim()
+    }
+
+    /**
+     * Every video in the list becomes an episode. Walks through all pages of the list
+     * (bounded by [MAX_LIST_PAGES]) so the whole list shows up.
+     */
+    private fun favoriteListEpisodes(response: Response): List<SEpisode> {
+        val firstUrl = response.request.url.toString()
+        val basePath = firstUrl.substringAfter(baseUrl).removeSuffixPage()
+        val collected = mutableListOf<Element>()
+
+        var document = response.asJsoup()
+        var page = 0
+        while (true) {
+            collected += document.select(LISTING_SELECTOR).filter { it.isVideoBlock() }
+            val hasNext = document.selectFirst(NEXT_PAGE_SELECTOR) != null ||
+                document.selectFirst(".pagination a.current + a[href]") != null
+            page++
+            if (!hasNext || page >= MAX_LIST_PAGES) break
+            document = client.newCall(GET("$baseUrl$basePath/$page", headers)).execute().asJsoup()
+        }
+
+        val total = collected.size
+        return collected.mapIndexed { index, element ->
+            val item = listingItemFromElement(element)
+            SEpisode.create().apply {
+                url = item.url
+                name = item.title
+                episode_number = (total - index).toFloat()
+                scanlator = item.author
+                date_upload = 0L
+            }
+        }
+    }
+
+    private fun String.humanizeSlug(): String = replace('-', ' ').replace('_', ' ').trim().ifBlank { "收藏夹" }
+
     private fun isLoggedIn(): Boolean {
         val cookies = runCatching { CookieManager.getInstance().getCookie(baseUrl) }.getOrNull() ?: return false
         return cookies.contains("session_token")
@@ -444,6 +574,8 @@ class XvideosXun :
         private val PLAYER_HIGH_REGEX = Regex("""html5player\.setVideoUrlHigh\('([^']+)'\)""")
         private val PLAYER_LOW_REGEX = Regex("""html5player\.setVideoUrlLow\('([^']+)'\)""")
         private val QUALITY_NUMBER_REGEX = Regex("""(\d{3,4})p""")
+        private val FAVORITE_PATH_REGEX = Regex("""/(favorite|playlist)/(\d+)/([A-Za-z0-9_\-]+)""")
+        private const val MAX_LIST_PAGES = 30
 
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
 

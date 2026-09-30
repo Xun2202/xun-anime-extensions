@@ -2,6 +2,9 @@ package eu.kanade.tachiyomi.animeextension.all.xvideosxun
 
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
 
 /**
  * A select filter whose entries carry a URL/query value next to their display name.
@@ -63,17 +66,42 @@ class AccountFilter : SelectFilter(
     "我的账户（需先在 WebView 登录）",
     listOf(
         "不使用" to "",
+        "我的收藏夹（列出全部列表）" to ACCOUNT_PLAYLISTS,
         "我喜欢的视频" to "videos-i-like",
         "稍后观看" to "watch-later",
         "观看历史" to "history",
     ),
 )
 
+const val ACCOUNT_PLAYLISTS = "account/playlists"
+
 class FavoriteListFilter : AnimeFilter.Text("收藏夹 / 播放列表 URL 或 ID")
 
 class UploaderFilter : AnimeFilter.Text("频道 / 模特 用户名或 URL")
 
 class TagFilter : AnimeFilter.Text("标签 (Tag)")
+
+/**
+ * "Best of" month picker; entries are generated for the last [BEST_MONTHS] months.
+ */
+class BestMonthFilter : SelectFilter("Best of 月份", bestMonthOptions()) {
+    companion object {
+        private const val BEST_MONTHS = 48
+
+        private fun bestMonthOptions(): List<Pair<String, String>> {
+            val fmt = SimpleDateFormat("yyyy-MM", Locale.US)
+            val cal = Calendar.getInstance()
+            return buildList {
+                add("不使用" to "")
+                repeat(BEST_MONTHS) {
+                    val value = fmt.format(cal.time)
+                    add(value to value)
+                    cal.add(Calendar.MONTH, -1)
+                }
+            }
+        }
+    }
+}
 
 class CategoryFilter : SelectFilter(
     "分类",
@@ -131,6 +159,7 @@ fun buildFilterList(): AnimeFilterList = AnimeFilterList(
     AccountFilter(),
     FavoriteListFilter(),
     UploaderFilter(),
+    BestMonthFilter(),
     CategoryFilter(),
     TagFilter(),
 )
