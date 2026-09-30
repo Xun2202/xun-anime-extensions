@@ -76,6 +76,8 @@ class XvideosXun :
         return GET("$baseUrl/best/$month/${page - 1}", headers)
     }
 
+    override fun popularAnimeParse(response: Response): AnimesPage = parseListingPage(response)
+
     override fun popularAnimeSelector(): String = LISTING_SELECTOR
 
     override fun popularAnimeFromElement(element: Element): SAnime = listingItemFromElement(element)
@@ -85,6 +87,8 @@ class XvideosXun :
     // =============================== Latest ===============================
 
     override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/new/${page - 1}", headers)
+
+    override fun latestUpdatesParse(response: Response): AnimesPage = parseListingPage(response)
 
     override fun latestUpdatesSelector(): String = LISTING_SELECTOR
 
@@ -143,18 +147,24 @@ class XvideosXun :
         if (isProfileJson) {
             return parseProfileJson(response)
         }
+        return parseListingPage(response)
+    }
 
+    private fun parseListingPage(response: Response): AnimesPage {
+        val url = response.request.url
+        val isAccountSection = url.pathSegments.first() in ACCOUNT_SECTIONS
         val document = response.asJsoup()
         val items = document.select(LISTING_SELECTOR).map(::listingItemFromElement)
 
-        if (items.isEmpty() && document.selectFirst(".empty-state-box") != null && url.pathSegments.first() in ACCOUNT_SECTIONS) {
-            if (!isLoggedIn()) {
-                throw Exception(LOGIN_HINT)
-            }
+        if (items.isEmpty() && isAccountSection && document.selectFirst(".empty-state-box") != null && !isLoggedIn()) {
+            throw Exception(LOGIN_HINT)
         }
 
         val hasNext = document.selectFirst(NEXT_PAGE_SELECTOR) != null ||
-            (items.size >= 30 && url.pathSegments.first() in ACCOUNT_SECTIONS)
+            // "Best of" pages: <a class="current"> followed by further page links
+            document.selectFirst(".pagination a.current + a[href]") != null ||
+            // Account fragments carry no pagination markup; assume more while pages are full
+            (isAccountSection && items.size >= 30)
         return AnimesPage(items, hasNext)
     }
 
