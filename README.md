@@ -50,6 +50,6 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 
 签名相关 secrets：`SIGNING_KEY`（base64 的 jks）、`ALIAS`、`KEY_STORE_PASSWORD`、`KEY_PASSWORD`。
 
-维护者须知：签名 keystore、密码以及完整的交接文档（CI 流程、站点接口、注意事项）都放在私有仓库 `Xun2202/xun-anime-extensions-vault` 的 `HANDOFF.md` 里，接手前先读它。本地副本在 `C:\Users\xun\.xun-anime-extensions`。
+维护者须知：签名 keystore、密码以及完整的交接文档（CI 流程、站点接口、注意事项）都放在私有仓库 `Xun2202/keystores` 的 `xun-anime-extensions/` 目录（`HANDOFF.md`、`signing.json`，附校验与一键恢复 Secrets 的脚本），接手前先读它。旧仓库 `xun-anime-extensions-vault` 已于 2026-10-05 归档。本地副本在 `C:\Users\xun\.xun-anime-extensions`。
 
 根目录的 `repo.json` 会被原样发布到 `repo` 分支，App 添加仓库时会读取它；`signingKeyFingerprint` 是签名证书的 SHA-256（`keytool -list -v` 里的值去掉冒号转小写），换签名密钥时必须同步更新。
