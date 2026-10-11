@@ -91,8 +91,7 @@ class XvideosXun :
     // =============================== Latest ===============================
 
     // Page 1 of "Newest" is the home page; /new/0 and /new do not exist.
-    override fun latestUpdatesRequest(page: Int): Request =
-        if (page <= 1) GET("$baseUrl/", headers) else GET("$baseUrl/new/${page - 1}", headers)
+    override fun latestUpdatesRequest(page: Int): Request = if (page <= 1) GET("$baseUrl/", headers) else GET("$baseUrl/new/${page - 1}", headers)
 
     override fun latestUpdatesParse(response: Response): AnimesPage = parseListingPage(response)
 
@@ -108,6 +107,15 @@ class XvideosXun :
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val p = page - 1
+
+        // Keyword + a favorites list: search inside that list (all pages are fetched and filtered locally,
+        // so everything comes back on page 1). The keyword rides in the URL fragment, which OkHttp never sends.
+        val listInput = filters.firstOfType<FavoriteListFilter>()?.state?.trim().orEmpty()
+        if (query.isNotBlank() && listInput.isNotBlank()) {
+            val listPath = resolveFavoritePath(listInput)
+            val fragment = if (page > 1) IN_LIST_DONE else IN_LIST_QUERY + query.trim()
+            return GET("$baseUrl$listPath/0#$fragment", headers)
+        }
 
         if (query.isNotBlank()) {
             val url = "$baseUrl/".toHttpUrl().newBuilder()
@@ -156,6 +164,12 @@ class XvideosXun :
 
     override fun searchAnimeParse(response: Response): AnimesPage {
         val url = response.request.url
+        url.fragment?.let { fragment ->
+            if (fragment == IN_LIST_DONE) return AnimesPage(emptyList(), false)
+            if (fragment.startsWith(IN_LIST_QUERY)) {
+                return searchInsideList(response, fragment.removePrefix(IN_LIST_QUERY))
+            }
+        }
         if (url.encodedPath.startsWith("$PLAYLISTS_API/alpha")) {
             return parsePlaylistsJson(response)
         }
@@ -187,6 +201,41 @@ class XvideosXun :
             // Account fragments carry no pagination markup; assume more while pages are full
             (isAccountSection && items.size >= 30)
         return AnimesPage(items, hasNext)
+    }
+
+    /**
+     * Walks every page of a favorites list (HTML listing, so it works for public lists without login and
+     * for the user's own lists with the WebView cookies) and keeps the videos whose title or uploader
+     * contains all the keywords. Each hit is a normal video entry, so it opens as its own page.
+     */
+    private fun searchInsideList(firstPage: Response, query: String): AnimesPage {
+        val keywords = query.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val listUrl = firstPage.request.url
+        val basePath = listUrl.encodedPath.substringBeforeLast('/')
+        val seen = HashSet<String>()
+        val hits = mutableListOf<SAnime>()
+
+        var document = firstPage.asJsoup()
+        var page = 0
+        while (true) {
+            val items = document.select(LISTING_SELECTOR).filter { it.isVideoBlock() }
+            if (items.isEmpty() && page == 0 && document.title().contains("login", ignoreCase = true)) {
+                throw Exception(LOGIN_HINT)
+            }
+            for (element in items) {
+                val anime = listingItemFromElement(element)
+                if (!seen.add(anime.url.substringBefore('?'))) continue
+                val haystack = "${anime.title} ${anime.author.orEmpty()}".lowercase()
+                if (keywords.all { haystack.contains(it) }) hits += anime
+            }
+            page++
+            val hasNext = document.selectFirst(NEXT_PAGE_SELECTOR) != null
+            if (!hasNext || items.isEmpty() || page >= MAX_LIST_PAGES) break
+            document = client.newCall(GET("$baseUrl$basePath/$page", headers)).execute().asJsoup()
+        }
+
+        if (hits.isEmpty()) throw Exception("列表里没有标题或上传者包含「$query」的视频（共翻了 $page 页）")
+        return AnimesPage(hits, false)
     }
 
     override fun searchAnimeSelector(): String = LISTING_SELECTOR
@@ -231,7 +280,12 @@ class XvideosXun :
                     appendLine("视频数: ${list.nbVideos}")
                     list.status?.let { appendLine("可见性: ${if (it == "NOBODY") "私密" else "公开"}") }
                     appendLine()
-                    append("每个“剧集”对应列表里的一个视频，加入书架后列表有新增会像追更一样出现")
+                    appendLine("每个“剧集”对应列表里的一个视频，顺序与网站列表一致（新加入的在上面）；加入书架后列表有新增会像追更一样出现。")
+                    appendLine("剧集太多时：右上角筛选 → 「排除翻译组」按上传者过滤，排序可选 按图源 / 按章节编号（= 加入收藏的先后）/ 按上传日期 / 按名称。")
+                    appendLine()
+                    appendLine("想把某个视频当成独立条目打开（看详情、单独加书架 / 下载），或按关键词找：")
+                    appendLine("浏览页 → 筛选 → 「收藏夹 / 播放列表 URL 或 ID」填下面的地址，再在搜索框输入关键词；留空关键词则整个列表按网格浏览。")
+                    append(baseUrl + list.url)
                 }
             }
         }
@@ -417,8 +471,7 @@ class XvideosXun :
     // ========================= Favorites lists ============================
 
     /** Numeric list id from a /favorite/{id}/{slug} (or /playlist/…) url, or null for anything else. */
-    private fun favoriteListId(url: String): Long? =
-        FAVORITE_PATH_REGEX.find(url)?.groupValues?.get(2)?.toLongOrNull()
+    private fun favoriteListId(url: String): Long? = FAVORITE_PATH_REGEX.find(url)?.groupValues?.get(2)?.toLongOrNull()
 
     private inline fun <reified T : PlaylistEnvelope> parsePlaylistEnvelope(response: Response): T {
         val dto = json.decodeFromString<T>(response.body.string())
@@ -439,9 +492,8 @@ class XvideosXun :
         return AnimesPage(lists.map(::playlistToAnime), hasNext)
     }
 
-    private fun parsePlaylistDetail(response: Response): PlaylistDto =
-        parsePlaylistEnvelope<PlaylistDetailDto>(response).data?.list
-            ?: throw Exception("收藏夹不存在或已被删除")
+    private fun parsePlaylistDetail(response: Response): PlaylistDto = parsePlaylistEnvelope<PlaylistDetailDto>(response).data?.list
+        ?: throw Exception("收藏夹不存在或已被删除")
 
     private fun playlistToAnime(list: PlaylistDto): SAnime = SAnime.create().apply {
         url = list.url
@@ -656,6 +708,8 @@ class XvideosXun :
         private val QUALITY_NUMBER_REGEX = Regex("""(\d{3,4})p""")
         private val FAVORITE_PATH_REGEX = Regex("""/(favorite|playlist)/(\d+)""")
         private const val PLAYLISTS_API = "/api/playlists"
+        private const val IN_LIST_QUERY = "inlist="
+        private const val IN_LIST_DONE = "inlist-done"
         private const val MAX_LIST_PAGES = 80 // 27 videos per page => ~2000 videos
 
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
