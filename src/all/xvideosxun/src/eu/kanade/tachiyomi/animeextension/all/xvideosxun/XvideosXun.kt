@@ -31,6 +31,7 @@ import org.jsoup.parser.Parser
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 
 /**
@@ -133,6 +134,11 @@ class XvideosXun :
         }
 
         if (query.isNotBlank()) {
+            // Anikku searches the plain uploader / model name when it is tapped on a details page; the site's
+            // keyword search does not match names, so go straight to the profile we saw on that page.
+            profilePaths[query.trim().lowercase()]?.let { profilePath ->
+                return GET("$baseUrl$profilePath/videos/best/$p", ajaxHeaders)
+            }
             val url = "$baseUrl/".toHttpUrl().newBuilder()
                 .addQueryParameter("k", query.trim())
                 .addQueryParameter("p", p.toString())
@@ -198,13 +204,46 @@ class XvideosXun :
         if (isProfileJson) {
             return parseProfileJson(response)
         }
+        val keyword = url.queryParameter("k")?.trim().orEmpty()
+        if (keyword.isNotBlank() && url.queryParameter("p") == "0") {
+            val document = response.asJsoup()
+            val page = parseListingPage(response, document)
+            if (page.animes.isEmpty()) return searchProfileFallback(document, keyword)
+            return page
+        }
         return parseListingPage(response)
     }
 
-    private fun parseListingPage(response: Response): AnimesPage {
+    /**
+     * A keyword search for a name usually returns nothing because the site only matches titles. Try the
+     * channel / model tile the results page may carry, then a plain user profile with that name.
+     */
+    private fun searchProfileFallback(document: Document, keyword: String): AnimesPage {
+        val tile = document.select("div.thumb-block-profile").firstOrNull { tile ->
+            tile.selectFirst("p.profile-name a")?.text()?.trim().equals(keyword, ignoreCase = true)
+        }
+        val candidates = listOfNotNull(
+            tile?.selectFirst("p.profile-name a")?.attr("href")?.takeIf { it.isNotBlank() },
+            "/profiles/" + keyword.lowercase().replace(Regex("[\\s_]+"), "-"),
+        )
+        for (profilePath in candidates) {
+            val response = client.newCall(GET("$baseUrl$profilePath/videos/best/0", ajaxHeaders)).execute()
+            if (!response.isSuccessful) {
+                response.close()
+                continue
+            }
+            val page = runCatching { parseProfileJson(response) }.getOrNull() ?: continue
+            if (page.animes.isNotEmpty()) {
+                profilePaths[keyword.lowercase()] = profilePath
+                return page
+            }
+        }
+        throw Exception("没有标题包含「$keyword」的视频；按上传者 / 模特名查到的主页也没有公开视频")
+    }
+
+    private fun parseListingPage(response: Response, document: Document = response.asJsoup()): AnimesPage {
         val url = response.request.url
         val isAccountSection = url.pathSegments.first() in ACCOUNT_SECTIONS
-        val document = response.asJsoup()
         val items = document.select(LISTING_SELECTOR)
             .filter { it.isVideoBlock() }
             .map(::listingItemFromElement)
@@ -240,10 +279,36 @@ class XvideosXun :
 
     /** One favorites-list video as a standalone entry (its own details page, one episode). */
     private fun playlistVideoToAnime(v: PlaylistVideoDto): SAnime = SAnime.create().apply {
-        url = v.u!!.substringBefore('?')
+        url = canonicalVideoPath(v.u!!) ?: v.u.substringBefore('?')
         title = Parser.unescapeEntities(v.tf ?: v.t ?: v.eid, false)
         thumbnail_url = v.i
         author = v.pn
+    }
+
+    /**
+     * The site writes the same video several ways: `/video.{eid}/{slug}` (API), `/video.{eid}/56819569/0/{slug}`
+     * (listing pages, with a per-request tracking segment), `…?pl=123` (favorites pages) and
+     * `/prof-video-click/{type}/{user}/{eid}/{slug}` (profile pages). Anikku keys entries by url, so collapse
+     * all of them to `/video.{eid}/{slug}` or the same video ends up in the library several times.
+     */
+    private fun canonicalVideoPath(href: String): String? {
+        val path = (href.toHttpUrlOrNull()?.encodedPath ?: href.substringBefore('?').substringBefore('#'))
+        val segments = path.trim('/').split('/').filter { it.isNotBlank() }
+        val eid: String
+        val slug: String
+        when {
+            segments.firstOrNull()?.startsWith("video.") == true -> {
+                eid = segments.first().removePrefix("video.")
+                slug = segments.drop(1).lastOrNull { !it.all(Char::isDigit) } ?: "_"
+            }
+            segments.firstOrNull() == "prof-video-click" && segments.size >= 5 -> {
+                eid = segments[segments.size - 2]
+                slug = segments.last()
+            }
+            else -> return null
+        }
+        if (eid.isBlank()) return null
+        return "/video.$eid/${slug.trimEnd('.').ifBlank { "_" }}"
     }
 
     /**
@@ -370,17 +435,24 @@ class XvideosXun :
         val ld = extractJsonLd(document)
 
         anime.title = ld?.name?.takeIf { it.isNotBlank() }
-            ?: document.selectFirst("h2.page-title")?.ownText()?.trim()
+            // The title may be wrapped in an "automatically translated" span, so ownText() alone can be empty
+            ?: document.selectFirst("h2.page-title")?.let { h2 ->
+                h2.selectFirst("#title-auto-tr")?.text() ?: h2.ownText()
+            }?.trim()?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("meta[property=og:title]")?.attr("content")
             ?: ""
 
         anime.thumbnail_url = ld?.thumbnailUrl?.firstOrNull()
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")
 
-        val uploader = document.selectFirst("li.main-uploader span.name")?.text()?.trim()
-        val models = document.select("li.model span.name").map { it.text().trim() }.filter { it.isNotBlank() }
+        val uploaderLink = document.selectFirst("li.main-uploader a[href]")
+        val uploader = uploaderLink?.selectFirst("span.name")?.text()?.trim()
+        val modelLinks = document.select("li.model a[href], li.pornstar a[href]")
+        val models = modelLinks.mapNotNull { it.selectFirst("span.name")?.text()?.trim()?.takeIf(String::isNotBlank) }
         anime.author = uploader
         anime.artist = models.joinToString().ifBlank { null }
+        rememberProfile(uploader, uploaderLink?.attr("href"))
+        modelLinks.forEach { rememberProfile(it.selectFirst("span.name")?.text()?.trim(), it.attr("href")) }
 
         anime.genre = document.select("a.is-keyword").map { it.text().trim() }.filter { it.isNotBlank() }.joinToString()
         anime.status = SAnime.COMPLETED
@@ -388,8 +460,9 @@ class XvideosXun :
         val duration = document.selectFirst("h2.page-title span.duration")?.text()
         val hdMark = document.selectFirst("h2.page-title span.video-hd-mark")?.text()
         val views = document.selectFirst("#v-views strong")?.text()
-        val likes = document.selectFirst("span.rating-good-nbr")?.text()
-        val dislikes = document.selectFirst("span.rating-bad-nbr")?.text()
+        // The site now shows percentages (`<span class="rating-good-perc">99<span>.0</span>%</span>`)
+        val likes = document.selectFirst("span.rating-good-perc, span.rating-good-nbr")?.text()?.replace(" ", "")
+        val dislikes = document.selectFirst("span.rating-bad-perc, span.rating-bad-nbr")?.text()?.replace(" ", "")
 
         anime.description = buildString {
             uploader?.let { appendLine("上传者: $it") }
@@ -397,7 +470,7 @@ class XvideosXun :
             duration?.let { appendLine("时长: $it") }
             hdMark?.let { appendLine("画质: $it") }
             views?.let { appendLine("观看: $it") }
-            if (likes != null || dislikes != null) appendLine("赞/踩: ${likes ?: "-"} / ${dislikes ?: "-"}")
+            if (likes != null || dislikes != null) appendLine("好评/差评: ${likes ?: "-"} / ${dislikes ?: "-"}")
             ld?.uploadDate?.let { appendLine("上传时间: ${it.substringBefore('T')}") }
             ld?.description?.takeIf { it.isNotBlank() && it != anime.title }?.let {
                 appendLine()
@@ -438,6 +511,59 @@ class XvideosXun :
     override fun episodeListSelector() = throw UnsupportedOperationException()
 
     override fun episodeFromElement(element: Element) = throw UnsupportedOperationException()
+
+    // ============================== Related ===============================
+
+    /**
+     * Anikku's "related" row. The request is [animeDetailsRequest]: for a favorites-list entry that is the
+     * list API (its videos become the related entries, each opening as its own page); for a video page the
+     * site's own recommendations live in a `video_related=[…]` script rather than in HTML tiles.
+     */
+    override fun relatedAnimeListParse(response: Response): List<SAnime> {
+        if (response.request.url.encodedPath.startsWith("$PLAYLISTS_API/list/")) {
+            return parsePlaylistDetail(response).videos.filter { it.isLive() }.map(::playlistVideoToAnime)
+        }
+        val html = response.body.string()
+        val array = extractJsArray(html, "video_related=") ?: return emptyList()
+        return runCatching { json.decodeFromString<List<PlaylistVideoDto>>(array) }
+            .getOrDefault(emptyList())
+            .filter { it.isLive() }
+            .map(::playlistVideoToAnime)
+    }
+
+    /** The JSON array that follows [marker] in a script, found by bracket matching (titles may contain `]`). */
+    private fun extractJsArray(html: String, marker: String): String? {
+        val start = html.indexOf(marker).takeIf { it >= 0 }?.let { html.indexOf('[', it) } ?: return null
+        if (start < 0) return null
+        var depth = 0
+        var inString = false
+        var i = start
+        while (i < html.length) {
+            val c = html[i]
+            when {
+                inString -> when (c) {
+                    '\\' -> i++
+                    '"' -> inString = false
+                }
+                c == '"' -> inString = true
+                c == '[' -> depth++
+                c == ']' -> if (--depth == 0) return html.substring(start, i + 1)
+            }
+            i++
+        }
+        return null
+    }
+
+    /** uploader / model name (lowercase) → profile path, filled while parsing details pages. */
+    private val profilePaths = ConcurrentHashMap<String, String>()
+
+    private fun rememberProfile(name: String?, href: String?) {
+        if (name.isNullOrBlank() || href.isNullOrBlank()) return
+        // Channel uploaders link as a bare "/javhd" on video pages; the videos API wants "/channels/javhd".
+        val path = href.substringBefore('?').substringBefore('#')
+        if (path.trim('/').isBlank()) return
+        profilePaths[name.trim().lowercase()] = resolveProfilePath(path)
+    }
 
     // ============================ Video Links =============================
 
@@ -525,7 +651,9 @@ class XvideosXun :
 
     private fun listingItemFromElement(element: Element): SAnime = SAnime.create().apply {
         val link = element.selectFirst("div.thumb a[href]") ?: element.selectFirst("a[href]")!!
-        setUrlWithoutDomain(link.absUrl("href").ifBlank { baseUrl + link.attr("href") })
+        val href = link.absUrl("href").ifBlank { baseUrl + link.attr("href") }
+        val canonical = canonicalVideoPath(href)
+        if (canonical != null) url = canonical else setUrlWithoutDomain(href)
         val titleLink = element.selectFirst("p.title a")
         title = titleLink?.attr("title")?.takeIf { it.isNotBlank() }
             ?: titleLink?.ownText()?.trim()
@@ -776,7 +904,7 @@ class XvideosXun :
         private const val NEXT_PAGE_SELECTOR = "a.next-page, .pagination a.next, .pagination li.next a"
 
         private val ACCOUNT_SECTIONS = setOf("videos-i-like", "watch-later", "history")
-        private val PROFILE_PREFIXES = setOf("channels", "models", "pornstars", "profiles", "amateur-channels", "model-channels")
+        private val PROFILE_PREFIXES = setOf("channels", "models", "pornstars", "profiles", "amateur-channels", "model-channels", "webcam-models")
 
         private const val LOGIN_HINT = "请先登录：在本源的浏览页点击右上角「在 WebView 中打开」，登录 XVideos 账户后返回重试"
 
