@@ -31,6 +31,7 @@ import org.jsoup.parser.Parser
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
+import kotlin.concurrent.thread
 
 /**
  * Xvideos source with the extras the stock extension lacks:
@@ -103,7 +104,11 @@ class XvideosXun :
 
     // =============================== Search ===============================
 
-    override fun getFilterList(): AnimeFilterList = buildFilterList()
+    override fun getFilterList(): AnimeFilterList {
+        val lists = myLists
+        if (lists == null) fetchMyListsAsync()
+        return buildFilterList(lists, isLoggedIn())
+    }
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val p = page - 1
@@ -115,6 +120,16 @@ class XvideosXun :
             val listPath = resolveFavoritePath(listInput)
             val fragment = if (page > 1) IN_LIST_DONE else IN_LIST_QUERY + query.trim()
             return GET("$baseUrl$listPath/0#$fragment", headers)
+        }
+
+        filters.firstOfType<MyListVideosFilter>()?.selectedValue?.takeIf { it.isNotBlank() }?.let { id ->
+            requireLogin()
+            // With a keyword every page is fetched and filtered locally, so everything comes back on page 1.
+            if (query.isNotBlank()) {
+                val fragment = if (page > 1) IN_LIST_DONE else IN_LIST_QUERY + query.trim()
+                return POST("$baseUrl$PLAYLISTS_API/list/$id/0#$fragment", ajaxHeaders)
+            }
+            return POST("$baseUrl$PLAYLISTS_API/list/$id/$p", ajaxHeaders)
         }
 
         if (query.isNotBlank()) {
@@ -164,11 +179,17 @@ class XvideosXun :
 
     override fun searchAnimeParse(response: Response): AnimesPage {
         val url = response.request.url
+        val isListApi = url.encodedPath.startsWith("$PLAYLISTS_API/list/")
         url.fragment?.let { fragment ->
             if (fragment == IN_LIST_DONE) return AnimesPage(emptyList(), false)
             if (fragment.startsWith(IN_LIST_QUERY)) {
-                return searchInsideList(response, fragment.removePrefix(IN_LIST_QUERY))
+                val query = fragment.removePrefix(IN_LIST_QUERY)
+                return if (isListApi) searchInsideListApi(response, query) else searchInsideList(response, query)
             }
+        }
+        if (isListApi) {
+            val list = parsePlaylistDetail(response)
+            return AnimesPage(list.videos.filter { it.isLive() }.map(::playlistVideoToAnime), list.nbMore > 0)
         }
         if (url.encodedPath.startsWith("$PLAYLISTS_API/alpha")) {
             return parsePlaylistsJson(response)
@@ -201,6 +222,58 @@ class XvideosXun :
             // Account fragments carry no pagination markup; assume more while pages are full
             (isAccountSection && items.size >= 30)
         return AnimesPage(items, hasNext)
+    }
+
+    private fun searchInsideListApi(firstPage: Response, query: String): AnimesPage {
+        val keywords = query.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val id = firstPage.request.url.pathSegments.getOrNull(3) ?: throw Exception("无法识别收藏夹 id")
+        val videos = collectPlaylistVideos(firstPage, id).second.filter { it.isLive() }
+        val hits = videos.filter { v ->
+            val haystack = "${v.tf ?: v.t ?: ""} ${v.pn ?: ""}".lowercase()
+            keywords.all { haystack.contains(it) }
+        }
+        if (hits.isEmpty()) throw Exception("这个收藏夹里没有标题或上传者包含「$query」的视频（共 ${videos.size} 个）")
+        return AnimesPage(hits.map(::playlistVideoToAnime), false)
+    }
+
+    private fun PlaylistVideoDto.isLive(): Boolean = !deleted && !u.isNullOrBlank()
+
+    /** One favorites-list video as a standalone entry (its own details page, one episode). */
+    private fun playlistVideoToAnime(v: PlaylistVideoDto): SAnime = SAnime.create().apply {
+        url = v.u!!.substringBefore('?')
+        title = Parser.unescapeEntities(v.tf ?: v.t ?: v.eid, false)
+        thumbnail_url = v.i
+        author = v.pn
+    }
+
+    /**
+     * The "pick one of my lists" filter needs the list names up front; fetch them once in the background
+     * (filters are built on the UI thread) and ask the user to hit "reset" once they are in.
+     */
+    @Volatile private var myLists: List<Pair<String, Long>>? = null
+
+    @Volatile private var myListsFetching = false
+
+    private fun fetchMyListsAsync() {
+        if (myListsFetching || !isLoggedIn()) return
+        myListsFetching = true
+        thread(isDaemon = true) {
+            runCatching {
+                val result = mutableListOf<Pair<String, Long>>()
+                var page = 0
+                while (page < MAX_ALPHA_PAGES) {
+                    val response = client.newCall(POST("$baseUrl$PLAYLISTS_API/alpha/$page", ajaxHeaders)).execute()
+                    val dto = parsePlaylistEnvelope<PlaylistsAlphaDto>(response)
+                    val lists = dto.data?.lists.orEmpty()
+                    result += lists.map { "${it.name}（${it.nbVideos}）" to it.id }
+                    val meta = dto.metadata
+                    if (lists.isEmpty() || meta == null || (meta.page + 1) * meta.nbPerPage >= meta.nbLists) break
+                    page++
+                }
+                myLists = result
+            }
+            myListsFetching = false
+        }
     }
 
     /**
@@ -283,8 +356,8 @@ class XvideosXun :
                     appendLine("每个“剧集”对应列表里的一个视频，顺序与网站列表一致（新加入的在上面）；加入书架后列表有新增会像追更一样出现。")
                     appendLine("剧集太多时：右上角筛选 → 「排除翻译组」按上传者过滤，排序可选 按图源 / 按章节编号（= 加入收藏的先后）/ 按上传日期 / 按名称。")
                     appendLine()
-                    appendLine("想把某个视频当成独立条目打开（看详情、单独加书架 / 下载），或按关键词找：")
-                    appendLine("浏览页 → 筛选 → 「收藏夹 / 播放列表 URL 或 ID」填下面的地址，再在搜索框输入关键词；留空关键词则整个列表按网格浏览。")
+                    appendLine("想让每个视频都是书架里独立的条目：浏览页 → 筛选 → 「我的某个收藏夹 → 每个视频一个条目」选这个收藏夹 → 长按任意一个进入批量选择 → 全选 → 加入书架（可顺手建一个同名分类）。")
+                    appendLine("同一处再输入搜索词 = 只列出标题 / 上传者匹配的视频。")
                     append(baseUrl + list.url)
                 }
             }
@@ -512,12 +585,10 @@ class XvideosXun :
      * POST /api/playlists/list/{id}/{page} returns 27 videos per page and `nb_more` = how many
      * remain after this page; keep going until it hits zero (bounded by [MAX_LIST_PAGES]).
      */
-    private fun playlistEpisodes(response: Response): List<SEpisode> {
-        val id = response.request.url.pathSegments.getOrNull(3)
-            ?: throw Exception("无法识别收藏夹 id")
+    private fun collectPlaylistVideos(firstPage: Response, id: String): Pair<PlaylistDto, List<PlaylistVideoDto>> {
         val videos = mutableListOf<PlaylistVideoDto>()
-
-        var list = parsePlaylistDetail(response)
+        val first = parsePlaylistDetail(firstPage)
+        var list = first
         var page = 0
         while (true) {
             videos += list.videos
@@ -526,8 +597,15 @@ class XvideosXun :
             val next = client.newCall(POST("$baseUrl$PLAYLISTS_API/list/$id/$page", ajaxHeaders)).execute()
             list = parsePlaylistDetail(next)
         }
+        return first to videos
+    }
 
-        val live = videos.filter { !it.deleted && !it.u.isNullOrBlank() }
+    private fun playlistEpisodes(response: Response): List<SEpisode> {
+        val id = response.request.url.pathSegments.getOrNull(3)
+            ?: throw Exception("无法识别收藏夹 id")
+        val videos = collectPlaylistVideos(response, id).second
+
+        val live = videos.filter { it.isLive() }
         val total = live.size
         return live.mapIndexed { index, v ->
             SEpisode.create().apply {
@@ -711,6 +789,7 @@ class XvideosXun :
         private const val IN_LIST_QUERY = "inlist="
         private const val IN_LIST_DONE = "inlist-done"
         private const val MAX_LIST_PAGES = 80 // 27 videos per page => ~2000 videos
+        private const val MAX_ALPHA_PAGES = 10 // 30 lists per page
 
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
 
