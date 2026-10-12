@@ -654,13 +654,54 @@ class XvideosXun :
         val href = link.absUrl("href").ifBlank { baseUrl + link.attr("href") }
         val canonical = canonicalVideoPath(href)
         if (canonical != null) url = canonical else setUrlWithoutDomain(href)
-        val titleLink = element.selectFirst("p.title a")
-        title = titleLink?.attr("title")?.takeIf { it.isNotBlank() }
-            ?: titleLink?.ownText()?.trim()
-            ?: link.attr("title")
+        title = listingTitle(element, link, canonical ?: href)
         val img = element.selectFirst("img")
         thumbnail_url = img?.attr("data-src")?.takeIf { it.isNotBlank() } ?: img?.attr("src")
-        author = element.selectFirst("p.metadata span.name")?.text()?.trim()
+        author = element.selectFirst("p.metadata span.name, .video-metadata a.name, .video-metadata span.name")
+            ?.text()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Home, /new and search still use `p.title a[title]` plus `p.metadata span.name`.
+     * /best was redesigned to `div.title[title] > a` plus `.video-metadata a.name`; the thumb
+     * link has no title attribute (and `img alt` is the generic "Video"), so the old
+     * `p.title a` lookup stored a blank title until the details page filled it in.
+     * Anchor text includes child nodes: a translated title can sit in a nested span, so
+     * ownText() is not enough. Never returns a blank string.
+     */
+    private fun listingTitle(element: Element, link: Element, href: String): String {
+        val anchorTitle = listOf("p.title a", "div.title a").firstNotNullOfOrNull { selector ->
+            element.selectFirst(selector)?.attr("title")?.trim()?.takeIf { it.isNotBlank() }
+        }
+        val blockTitle = listOf("div.title", "p.title").firstNotNullOfOrNull { selector ->
+            element.selectFirst(selector)?.attr("title")?.trim()?.takeIf { it.isNotBlank() }
+        }
+        val raw = anchorTitle
+            ?: blockTitle
+            ?: element.selectFirst("p.title a, div.title a")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: element.select("img[alt]").asSequence()
+                .map { it.attr("alt").trim() }
+                .firstOrNull { it.isNotBlank() && !it.equals("Video", ignoreCase = true) }
+            ?: link.attr("title").trim().takeIf { it.isNotBlank() }
+            ?: titleFromSlug(href)
+        return Parser.unescapeEntities(raw, false).trim().ifBlank { titleFromSlug(href) }
+    }
+
+    /** Video slug from [href], underscores turned into spaces. Never blank. */
+    private fun titleFromSlug(href: String): String {
+        val path = href.toHttpUrlOrNull()?.encodedPath ?: href.substringBefore('?').substringBefore('#')
+        val segments = path.trim('/').split('/').filter { it.isNotBlank() }
+        val slug = segments.lastOrNull { segment ->
+            segment != "_" && !segment.all(Char::isDigit) && !segment.startsWith("video.")
+        }
+        val readable = slug?.trimEnd('.')?.replace('_', ' ')?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
+        if (readable.isNotBlank()) return readable
+        return segments.firstOrNull { it.startsWith("video.") }
+            ?.removePrefix("video.")
+            ?.takeIf { it.isNotBlank() }
+            ?: "Video"
     }
 
     /** Only keep tiles that point at a video (home page also carries channel/ad tiles). */
