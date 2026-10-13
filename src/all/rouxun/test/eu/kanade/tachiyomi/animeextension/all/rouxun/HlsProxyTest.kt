@@ -9,8 +9,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.BufferedInputStream
+import java.io.File
 import java.io.IOException
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.zip.Deflater
@@ -58,6 +60,63 @@ class HlsProxyTest {
             val bytes = client.newCall(Request.Builder().url(segment).build()).execute().body.bytes()
             assertArrayEquals(ts, bytes)
         }
+    }
+
+    @Test
+    fun keepAliveRangeRequestReturnsTheWholeSegmentAndCloses() {
+        val ts = ByteArray(188 * 4).also { bytes ->
+            for (offset in bytes.indices step 188) bytes[offset] = 0x47
+        }
+        Upstream { path ->
+            when (path) {
+                "/index.jpg" -> Triple(200, "text/plain", playlist("/C-000.jpg").toByteArray())
+                "/C-000.jpg" -> Triple(200, "image/jpeg", ts)
+                else -> Triple(404, "text/plain", "missing".toByteArray())
+            }
+        }.use { upstream ->
+            val proxy = HlsProxy(client, headers)
+            val local = proxy.playlistUrl("vid", upstream.url("/index.jpg"))
+            val playlist = client.newCall(Request.Builder().url(local).build()).execute().body.string()
+            val segment = playlist.lineSequence().map { it.trim() }.first { it.isNotEmpty() && !it.startsWith("#") }
+            val port = segment.substringAfter("http://127.0.0.1:").substringBefore("/").toInt()
+            val path = segment.substringAfter(":$port")
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress("127.0.0.1", port), 2000)
+                socket.soTimeout = 2000
+                val request = "GET $path HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nRange: bytes=0-\r\nConnection: keep-alive\r\nUser-Agent: Lavf/60.16.100\r\n\r\n"
+                socket.getOutputStream().write(request.toByteArray(Charsets.ISO_8859_1))
+                val input = socket.getInputStream()
+                val raw = readUntilEof(input)
+                val headerEnd = indexOf(raw, "\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+                assertTrue(headerEnd > 0)
+                val head = String(raw, 0, headerEnd, Charsets.ISO_8859_1)
+                assertTrue(head.startsWith("HTTP/1.1 200"))
+                assertTrue(head.contains("Content-Length: ${ts.size}"))
+                assertTrue(head.contains("Connection: close"))
+                val body = raw.copyOfRange(headerEnd + 4, raw.size)
+                assertArrayEquals(ts, body)
+            }
+        }
+    }
+
+    /**
+     * Android hard-codes [InetAddress.getLoopbackAddress] to ::1. A socket bound there
+     * refuses 127.0.0.1, which is what the playlist tells ffmpeg to open. The child JVM
+     * prefers IPv6 addresses so this fails if the proxy goes back to that bind.
+     */
+    @Test
+    fun ipv4ClientReachesProxyWhenLoopbackPrefersIpv6() {
+        val classpath = System.getProperty("java.class.path")
+        val argFile = File.createTempFile("rouxun-ipv6-probe", ".txt")
+        argFile.writeText("-Djava.net.preferIPv6Addresses=true\n-cp\n$classpath\n${Ipv4ListenProbe::class.java.name}\n")
+        val java = File(System.getProperty("java.home"), "bin/java").absolutePath
+        val process = ProcessBuilder(java, "@${argFile.absolutePath}")
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText()
+        val code = process.waitFor()
+        assertEquals(output, 0, code)
+        argFile.delete()
     }
 
     @Test
@@ -115,7 +174,7 @@ class HlsProxyTest {
     private class Upstream(
         private val handler: (String) -> Triple<Int, String, ByteArray>,
     ) : AutoCloseable {
-        private val socket = ServerSocket(0, 8, InetAddress.getLoopbackAddress())
+        private val socket = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
         private val thread = thread(isDaemon = true, name = "rouxun-test-upstream") { acceptLoop() }
 
         fun url(path: String) = "http://127.0.0.1:${socket.localPort}$path"
@@ -165,5 +224,44 @@ class HlsProxyTest {
             socket.close()
             thread.join(1000)
         }
+    }
+
+    private fun readUntilEof(input: java.io.InputStream): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(4096)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            out.write(buffer, 0, read)
+        }
+        return out.toByteArray()
+    }
+
+    private fun indexOf(data: ByteArray, needle: ByteArray): Int {
+        if (needle.isEmpty() || data.size < needle.size) return -1
+        for (start in 0..data.size - needle.size) {
+            var matches = true
+            for (i in needle.indices) {
+                if (data[start + i] != needle[i]) {
+                    matches = false
+                    break
+                }
+            }
+            if (matches) return start
+        }
+        return -1
+    }
+}
+
+/** Child process entry. Exit 0 when an IPv4 client can open the proxy. */
+object Ipv4ListenProbe {
+    @JvmStatic
+    fun main(args: Array<String>) {
+        val proxy = HlsProxy(OkHttpClient(), Headers.Builder().add("User-Agent", "probe").build())
+        val port = proxy.playlistUrl("vid", "http://127.0.0.1/unused")
+            .substringAfter("http://127.0.0.1:")
+            .substringBefore("/")
+            .toInt()
+        Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 2000) }
     }
 }

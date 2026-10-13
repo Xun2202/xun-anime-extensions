@@ -1,7 +1,7 @@
 ext {
     extName = 'RouXun'
     extClass = '.RouXun'
-    extVersionCode = 3
+    extVersionCode = 4
     isNsfw = true
 }
 

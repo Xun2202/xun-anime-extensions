@@ -37,8 +37,13 @@ import kotlin.concurrent.thread
  *    `/seg/<n>.ts?u=<absolute upstream URL>`.
  *  - `GET /seg/<n>.ts?u=<upstream>` streams the segment with the PNG prefix stripped.
  *
- * Responses are `Connection: close` without a Content-Length, so clients read until EOF.
- * Range headers are ignored (HLS clients do not need them for whole segments).
+ * The listen socket is IPv4 `127.0.0.1`. Android's [InetAddress.getLoopbackAddress] is hard-coded
+ * to `::1`, and a socket bound there refuses the `127.0.0.1` URLs written into the playlist, so
+ * the player waits and then reports loading failed.
+ *
+ * Responses send `Connection: close`. ffmpeg opens every URL with `Range: bytes=0-` and, for
+ * segments, `Connection: keep-alive`; a 200 with the whole body is what it accepts for that
+ * range. HLS seeks by segment, so mid-segment ranges are not required.
  */
 internal class HlsProxy(
     private val client: OkHttpClient,
@@ -73,7 +78,7 @@ internal class HlsProxy(
     @Synchronized
     private fun ensureStarted(): ServerSocket {
         server?.takeIf { !it.isClosed }?.let { return it }
-        val socket = ServerSocket(0, 16, InetAddress.getLoopbackAddress())
+        val socket = ServerSocket(0, 16, InetAddress.getByName(IPV4_LOOPBACK))
         server = socket
         thread(isDaemon = true, name = "rouxun-hls-accept") { acceptLoop(socket) }
         return socket
@@ -350,6 +355,9 @@ internal class HlsProxy(
 
     companion object {
         private const val TAG = "RouXunHlsProxy"
+
+        /** Literal IPv4 loopback. Do not switch this to [InetAddress.getLoopbackAddress]. */
+        private const val IPV4_LOOPBACK = "127.0.0.1"
 
         private val PNG_SIGNATURE = byteArrayOf(
             0x89.toByte(),
