@@ -1,0 +1,15 @@
+Hanime1.me Xun
+================
+
+This directory is a modified derivative of:
+
+    yuzono/anime-extensions  src/zh/hanime1  (extension versionCode 7)
+    https://github.com/yuzono/anime-extensions/tree/master/src/zh/hanime1
+
+That work is licensed under the Apache License, Version 2.0.
+The original Kotlin sources did not carry a separate copyright header.
+
+Modifications (package eu.kanade.tachiyomi.animeextension.zh.hanime1xun,
+search cards, author collections, episode grouping, filters, tests) are
+published in Xun2202/xun-anime-extensions, which is also Apache-2.0.
+The license text is the LICENSE file at the root of this repository.
