@@ -8,6 +8,7 @@ import keiyoushi.gradle.extensions.implementation
 import keiyoushi.gradle.extensions.kei
 import keiyoushi.gradle.extensions.libs
 import keiyoushi.gradle.extensions.plugins
+import keiyoushi.gradle.extensions.testImplementation
 import keiyoushi.gradle.tasks.GenerateKeepRulesTask
 import keiyoushi.gradle.utils.assertWithoutFlag
 import org.gradle.api.Plugin
@@ -54,6 +55,19 @@ class PluginExtensionLegacy : Plugin<Project> {
                     assets.directories.clear()
                     assets.directories.add("assets")
                 }
+                // Harmony: JVM unit tests live next to `src`, not inside it (which is the main source set).
+                named("test") {
+                    java.directories.clear()
+                    java.directories.add("test")
+                    kotlin.directories.clear()
+                    kotlin.directories.add("test")
+                    resources.directories.clear()
+                    resources.directories.add("test-resources")
+                }
+            }
+
+            testOptions {
+                unitTests.isReturnDefaultValues = true
             }
 
             defaultConfig {
@@ -153,6 +167,9 @@ class PluginExtensionLegacy : Plugin<Project> {
             if (theme != null) implementation(theme) // Overrides core launcher icons
             implementation(project(":core"))
             compileOnly(libs.bundles.common)
+            // Harmony: the host app provides these at runtime; unit tests need them on the classpath.
+            testImplementation(libs.bundles.common)
+            testImplementation(libs.junit)
         }
 
         afterEvaluate {

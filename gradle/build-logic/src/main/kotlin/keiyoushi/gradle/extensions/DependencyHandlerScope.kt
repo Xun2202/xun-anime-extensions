@@ -31,3 +31,12 @@ fun DependencyHandlerScope.implementation(dependencyNotation: Project) {
 fun DependencyHandlerScope.implementation(dependencyNotation: ProjectDependency) {
     add("implementation", dependencyNotation)
 }
+
+@JvmName("testImplementationBundle")
+fun DependencyHandlerScope.testImplementation(dependencyNotation: Provider<ExternalModuleDependencyBundle>) {
+    add("testImplementation", dependencyNotation)
+}
+
+fun DependencyHandlerScope.testImplementation(dependencyNotation: Provider<MinimalExternalModuleDependency>) {
+    add("testImplementation", dependencyNotation)
+}
