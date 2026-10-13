@@ -1,11 +1,12 @@
 package eu.kanade.tachiyomi.animeextension.all.rouxun
 
 import android.util.Log
-import eu.kanade.tachiyomi.network.GET
+import okhttp3.CacheControl
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
@@ -24,10 +25,12 @@ import kotlin.concurrent.thread
 /**
  * Loopback HTTP server that turns rou.video's disguised HLS into something mpv / ffmpeg can play.
  *
- * The site serves both the media playlist and every segment as a PNG file: a real PNG header
- * plus a private `roUd` chunk whose payload is the actual data (playlist: deflate-compressed
- * m3u8; segment: raw MPEG-TS). The browser player unwraps them in a Shaka response filter;
- * nothing in Android's media stack can, so this proxy does it:
+ * Many playlists and segments are a PNG: a real PNG header plus a private `roUd` chunk
+ * (playlist: deflate-compressed m3u8; segment: raw MPEG-TS). Some series renditions are not:
+ * the playlist is raw m3u8 served as `.jpg` / `text/plain`, and each segment is raw MPEG-TS
+ * served as `.jpg` / `image/jpeg`. Only a PNG signature is unwrapped; anything else is passed
+ * through. The browser does the same check in a Shaka response filter; Android's media stack
+ * cannot, so this proxy does it:
  *
  *  - `GET /hls/<id>/index.m3u8?u=<upstream>` fetches the playlist (following the
  *    `/api/hls/<id>` redirect), unwraps + inflates it and rewrites every segment URI to
@@ -53,6 +56,19 @@ internal class HlsProxy(
         get() = "http://127.0.0.1:${ensureStarted().localPort}"
 
     fun playlistUrl(videoId: String, upstreamUrl: String): String = "$baseUrl/hls/$videoId/index.m3u8?u=${encode(upstreamUrl)}"
+
+    /** Throws with a user-visible message when [upstreamUrl] is not an m3u8 playlist. */
+    fun assertPlayable(upstreamUrl: String) {
+        client.newCall(upstreamGet(upstreamUrl)).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw Exception("rou.video 没有返回可播放的视频（HTTP ${response.code}）")
+            }
+            val text = String(unwrap(response.body.bytes()), Charsets.UTF_8)
+            if (!text.contains("#EXTM3U")) {
+                throw Exception("rou.video 返回的播放列表无法识别")
+            }
+        }
+    }
 
     @Synchronized
     private fun ensureStarted(): ServerSocket {
@@ -116,7 +132,7 @@ internal class HlsProxy(
 
     private fun servePlaylist(url: HttpUrl, output: OutputStream, headOnly: Boolean) {
         val upstream = url.queryParameter("u") ?: throw IOException("missing upstream url")
-        client.newCall(GET(upstream, upstreamHeaders)).execute().use { response ->
+        client.newCall(upstreamGet(upstream)).execute().use { response ->
             if (!response.isSuccessful) throw IOException("upstream playlist ${response.code}")
             val finalUrl = response.request.url
             val playlist = String(unwrap(response.body.bytes()), Charsets.UTF_8)
@@ -153,7 +169,7 @@ internal class HlsProxy(
 
     private fun serveSegment(url: HttpUrl, output: OutputStream, headOnly: Boolean) {
         val upstream = url.queryParameter("u") ?: throw IOException("missing upstream url")
-        client.newCall(GET(upstream, upstreamHeaders)).execute().use { response ->
+        client.newCall(upstreamGet(upstream)).execute().use { response ->
             if (!response.isSuccessful) throw IOException("upstream segment ${response.code}")
             val input = BufferedInputStream(response.body.byteStream(), 64 * 1024)
             val payload = locatePayload(input, response.body.contentLength())
@@ -276,6 +292,16 @@ internal class HlsProxy(
             }
         }
     }
+
+    /**
+     * Signed playlist and segment URLs are `Cache-Control: public`. The shared client would
+     * otherwise replay that body, including auth query strings that the CDN has already rotated.
+     */
+    private fun upstreamGet(url: String): Request = Request.Builder()
+        .url(url)
+        .headers(upstreamHeaders)
+        .cacheControl(CacheControl.FORCE_NETWORK)
+        .build()
 
     private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
