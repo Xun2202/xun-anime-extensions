@@ -125,6 +125,32 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 
 ```bash
 ./gradlew :src:zh:hanime1xun:testDebugUnitTest
+
+### Rule34Video Xun — `src/en/rule34videoxun`（v11，APK 14.11）
+
+改自 [yuzono/anime-extensions](https://github.com/yuzono/anime-extensions) 的 `src/en/rule34video` v10（Apache-2.0，说明在该目录 `NOTICE`），已修改。源在 App 里的名字仍是 `Rule34Video`、语言 `en`，生成的源 id 与原版相同。
+
+和原版的差别：
+
+- **作者合集**：筛选里「Search type」选 Models。有关键词时走站点的 `GET /models_json.php?q=<词>&page=<页>`；空白关键词浏览 `GET /models/`（第 2 页起 `?from=`）。结果是作者合集，地址 `/models/<slug>/`，标题是作者名，缩略图是头像。普通视频搜索的第 1 页，如果关键词和某个作者 slug 完全一致（例如 `vicineko`），最前面再插入这条作者合集。
+- **追更**：作者合集可以加入书架。详情描述是「作者合集：N 个视频」。剧集是作者页分页里的视频（站点最新在前，最多 40 页），每集地址是视频页；作者上传新片就是新剧集。普通视频仍是一集。普通视频详情的作者填页面上的 model 名（没有则用上传者），Anikku 点名字会按这个名字搜索。
+- **画质**：首选画质增加「最高可用」并作为默认。选项为页面上实际有的 2160p / 1440p / 1080p / 720p / 480p / 360p，标题写成 `2160p` 这种，下载画质选择器能从标题里认出高度。另有时长筛选，排序增加 Longest。作者页里的 WIP / 合集不过滤。
+- **播放地址**：页面上的 `get_file` 链接带一次性的 `v-acctoken`。不带会话 cookie 时很快 403；带上打开视频页时的 cookie 和 Referer，同一链接可以反复 302。扩展在返回播放列表前跟一次跳转，把跳转后的 CDN 地址交给播放器，并去掉 `download=true`（否则响应是附件）。播放器只带 User-Agent、Referer、Accept，不带会话 cookie。
+
+安装：如果已经装过原版 Rule34Video，先卸载再装这个。两边源 id 相同，卸载原版后书架条目还在，装上这个就能继续用。
+
+已知限制：关键词搜索噪音大；作者页会带上 WIP、合集和错标的视频。CDN 在美国，大陆速度可能慢。想支持正版请走作者自己的 Patreon（ViciNeko）/ SubscribeStar（vicineko）。
+
+本机测试（不访问网站时，在线那条会跳过）：
+
+```bash
+./gradlew :src:en:rule34videoxun:testDebugUnitTest
+```
+
+要打真实网站（只 Range 作者页最新一条的前 1 MB，不整段下载）：
+
+```bash
+CANARY_LIVE=1 ./gradlew :src:en:rule34videoxun:testDebugUnitTest --tests '*LiveCanary*'
 ```
 
 ## 鲁棒性 / 金丝雀
