@@ -84,11 +84,11 @@ class XvideosXun :
 
     override fun popularAnimeParse(response: Response): AnimesPage = parseListingPage(response)
 
-    override fun popularAnimeSelector(): String = LISTING_SELECTOR
+    override fun popularAnimeSelector(): String = XvideosXunParser.LISTING_SELECTOR
 
     override fun popularAnimeFromElement(element: Element): SAnime = listingItemFromElement(element)
 
-    override fun popularAnimeNextPageSelector(): String = NEXT_PAGE_SELECTOR
+    override fun popularAnimeNextPageSelector(): String = XvideosXunParser.NEXT_PAGE_SELECTOR
 
     // =============================== Latest ===============================
 
@@ -97,11 +97,11 @@ class XvideosXun :
 
     override fun latestUpdatesParse(response: Response): AnimesPage = parseListingPage(response)
 
-    override fun latestUpdatesSelector(): String = LISTING_SELECTOR
+    override fun latestUpdatesSelector(): String = XvideosXunParser.LISTING_SELECTOR
 
     override fun latestUpdatesFromElement(element: Element): SAnime = listingItemFromElement(element)
 
-    override fun latestUpdatesNextPageSelector(): String = NEXT_PAGE_SELECTOR
+    override fun latestUpdatesNextPageSelector(): String = XvideosXunParser.NEXT_PAGE_SELECTOR
 
     // =============================== Search ===============================
 
@@ -243,24 +243,17 @@ class XvideosXun :
 
     private fun parseListingPage(response: Response, document: Document = response.asJsoup()): AnimesPage {
         val url = response.request.url
-        val isAccountSection = url.pathSegments.first() in ACCOUNT_SECTIONS
-        val items = document.select(LISTING_SELECTOR)
-            .filter { it.isVideoBlock() }
-            .map(::listingItemFromElement)
+        val isAccountSection = url.pathSegments.firstOrNull() in ACCOUNT_SECTIONS
+        val page = XvideosXunParser.parseListing(document, baseUrl, isAccountSection)
 
-        if (items.isEmpty() && isAccountSection) {
+        if (page.items.isEmpty() && isAccountSection) {
             val sessionGone = document.title().contains("login", ignoreCase = true)
             if (sessionGone || (document.selectFirst(".empty-state-box") != null && !isLoggedIn())) {
                 throw Exception(LOGIN_HINT)
             }
         }
 
-        val hasNext = document.selectFirst(NEXT_PAGE_SELECTOR) != null ||
-            // "Best of" pages: <a class="current"> followed by further page links
-            document.selectFirst(".pagination a.current + a[href]") != null ||
-            // Account fragments carry no pagination markup; assume more while pages are full
-            (isAccountSection && items.size >= 30)
-        return AnimesPage(items, hasNext)
+        return AnimesPage(page.items.map(::listingItemToAnime), page.hasNext)
     }
 
     private fun searchInsideListApi(firstPage: Response, query: String): AnimesPage {
@@ -279,36 +272,10 @@ class XvideosXun :
 
     /** One favorites-list video as a standalone entry (its own details page, one episode). */
     private fun playlistVideoToAnime(v: PlaylistVideoDto): SAnime = SAnime.create().apply {
-        url = canonicalVideoPath(v.u!!) ?: v.u.substringBefore('?')
+        url = XvideosXunParser.canonicalVideoPath(v.u!!) ?: v.u.substringBefore('?')
         title = Parser.unescapeEntities(v.tf ?: v.t ?: v.eid, false)
         thumbnail_url = v.i
         author = v.pn
-    }
-
-    /**
-     * The site writes the same video several ways: `/video.{eid}/{slug}` (API), `/video.{eid}/56819569/0/{slug}`
-     * (listing pages, with a per-request tracking segment), `…?pl=123` (favorites pages) and
-     * `/prof-video-click/{type}/{user}/{eid}/{slug}` (profile pages). Anikku keys entries by url, so collapse
-     * all of them to `/video.{eid}/{slug}` or the same video ends up in the library several times.
-     */
-    private fun canonicalVideoPath(href: String): String? {
-        val path = (href.toHttpUrlOrNull()?.encodedPath ?: href.substringBefore('?').substringBefore('#'))
-        val segments = path.trim('/').split('/').filter { it.isNotBlank() }
-        val eid: String
-        val slug: String
-        when {
-            segments.firstOrNull()?.startsWith("video.") == true -> {
-                eid = segments.first().removePrefix("video.")
-                slug = segments.drop(1).lastOrNull { !it.all(Char::isDigit) } ?: "_"
-            }
-            segments.firstOrNull() == "prof-video-click" && segments.size >= 5 -> {
-                eid = segments[segments.size - 2]
-                slug = segments.last()
-            }
-            else -> return null
-        }
-        if (eid.isBlank()) return null
-        return "/video.$eid/${slug.trimEnd('.').ifBlank { "_" }}"
     }
 
     /**
@@ -356,19 +323,19 @@ class XvideosXun :
         var document = firstPage.asJsoup()
         var page = 0
         while (true) {
-            val items = document.select(LISTING_SELECTOR).filter { it.isVideoBlock() }
-            if (items.isEmpty() && page == 0 && document.title().contains("login", ignoreCase = true)) {
+            val parsed = XvideosXunParser.parseListing(document, baseUrl, accountSection = false)
+            if (parsed.items.isEmpty() && page == 0 && document.title().contains("login", ignoreCase = true)) {
                 throw Exception(LOGIN_HINT)
             }
-            for (element in items) {
-                val anime = listingItemFromElement(element)
+            for (item in parsed.items) {
+                val anime = listingItemToAnime(item)
                 if (!seen.add(anime.url.substringBefore('?'))) continue
                 val haystack = "${anime.title} ${anime.author.orEmpty()}".lowercase()
                 if (keywords.all { haystack.contains(it) }) hits += anime
             }
             page++
-            val hasNext = document.selectFirst(NEXT_PAGE_SELECTOR) != null
-            if (!hasNext || items.isEmpty() || page >= MAX_LIST_PAGES) break
+            val hasNext = document.selectFirst(XvideosXunParser.NEXT_PAGE_SELECTOR) != null
+            if (!hasNext || parsed.items.isEmpty() || page >= MAX_LIST_PAGES) break
             document = client.newCall(GET("$baseUrl$basePath/$page", headers)).execute().asJsoup()
         }
 
@@ -376,11 +343,11 @@ class XvideosXun :
         return AnimesPage(hits, false)
     }
 
-    override fun searchAnimeSelector(): String = LISTING_SELECTOR
+    override fun searchAnimeSelector(): String = XvideosXunParser.LISTING_SELECTOR
 
     override fun searchAnimeFromElement(element: Element): SAnime = listingItemFromElement(element)
 
-    override fun searchAnimeNextPageSelector(): String = NEXT_PAGE_SELECTOR
+    override fun searchAnimeNextPageSelector(): String = XvideosXunParser.NEXT_PAGE_SELECTOR
 
     private fun parseProfileJson(response: Response): AnimesPage {
         val data = json.decodeFromString<ProfileVideosDto>(response.body.string())
@@ -432,47 +399,30 @@ class XvideosXun :
 
     override fun animeDetailsParse(document: Document): SAnime {
         val anime = SAnime.create()
-        val ld = extractJsonLd(document)
+        val details = XvideosXunParser.parseVideoDetails(document)
+        val models = details.models.map { it.name }
 
-        anime.title = ld?.name?.takeIf { it.isNotBlank() }
-            // The title may be wrapped in an "automatically translated" span, so ownText() alone can be empty
-            ?: document.selectFirst("h2.page-title")?.let { h2 ->
-                h2.selectFirst("#title-auto-tr")?.text() ?: h2.ownText()
-            }?.trim()?.takeIf { it.isNotBlank() }
-            ?: document.selectFirst("meta[property=og:title]")?.attr("content")
-            ?: ""
-
-        anime.thumbnail_url = ld?.thumbnailUrl?.firstOrNull()
-            ?: document.selectFirst("meta[property=og:image]")?.attr("content")
-
-        val uploaderLink = document.selectFirst("li.main-uploader a[href]")
-        val uploader = uploaderLink?.selectFirst("span.name")?.text()?.trim()
-        val modelLinks = document.select("li.model a[href], li.pornstar a[href]")
-        val models = modelLinks.mapNotNull { it.selectFirst("span.name")?.text()?.trim()?.takeIf(String::isNotBlank) }
-        anime.author = uploader
+        anime.title = details.title
+        anime.thumbnail_url = details.thumbnailUrl
+        anime.author = details.uploaderName
         anime.artist = models.joinToString().ifBlank { null }
-        rememberProfile(uploader, uploaderLink?.attr("href"))
-        modelLinks.forEach { rememberProfile(it.selectFirst("span.name")?.text()?.trim(), it.attr("href")) }
+        rememberProfile(details.uploaderName, details.uploaderHref)
+        details.models.forEach { rememberProfile(it.name, it.href) }
 
-        anime.genre = document.select("a.is-keyword").map { it.text().trim() }.filter { it.isNotBlank() }.joinToString()
+        anime.genre = details.genres.joinToString()
         anime.status = SAnime.COMPLETED
 
-        val duration = document.selectFirst("h2.page-title span.duration")?.text()
-        val hdMark = document.selectFirst("h2.page-title span.video-hd-mark")?.text()
-        val views = document.selectFirst("#v-views strong")?.text()
-        // The site now shows percentages (`<span class="rating-good-perc">99<span>.0</span>%</span>`)
-        val likes = document.selectFirst("span.rating-good-perc, span.rating-good-nbr")?.text()?.replace(" ", "")
-        val dislikes = document.selectFirst("span.rating-bad-perc, span.rating-bad-nbr")?.text()?.replace(" ", "")
-
         anime.description = buildString {
-            uploader?.let { appendLine("上传者: $it") }
+            details.uploaderName?.let { appendLine("上传者: $it") }
             if (models.isNotEmpty()) appendLine("出演: ${models.joinToString()}")
-            duration?.let { appendLine("时长: $it") }
-            hdMark?.let { appendLine("画质: $it") }
-            views?.let { appendLine("观看: $it") }
-            if (likes != null || dislikes != null) appendLine("好评/差评: ${likes ?: "-"} / ${dislikes ?: "-"}")
-            ld?.uploadDate?.let { appendLine("上传时间: ${it.substringBefore('T')}") }
-            ld?.description?.takeIf { it.isNotBlank() && it != anime.title }?.let {
+            details.duration?.let { appendLine("时长: $it") }
+            details.hdMark?.let { appendLine("画质: $it") }
+            details.views?.let { appendLine("观看: $it") }
+            if (details.likes != null || details.dislikes != null) {
+                appendLine("好评/差评: ${details.likes ?: "-"} / ${details.dislikes ?: "-"}")
+            }
+            details.uploadDate?.let { appendLine("上传时间: ${it.substringBefore('T')}") }
+            details.description?.takeIf { it.isNotBlank() && it != anime.title }?.let {
                 appendLine()
                 appendLine(it)
             }
@@ -496,14 +446,14 @@ class XvideosXun :
         }
 
         val document = response.asJsoup()
-        val ld = extractJsonLd(document)
+        val details = XvideosXunParser.parseVideoDetails(document)
         val episode = SEpisode.create().apply {
             name = "Video"
             episode_number = 1F
             setUrlWithoutDomain(response.request.url.toString())
-            date_upload = DATE_FORMAT.tryParse(ld?.uploadDate).takeIf { it > 0 } ?: System.currentTimeMillis()
-            preview_url = ld?.thumbnailUrl?.firstOrNull()
-            summary = document.selectFirst("h2.page-title span.duration")?.text()?.trim()
+            date_upload = DATE_FORMAT.tryParse(details.uploadDate).takeIf { it > 0 } ?: System.currentTimeMillis()
+            preview_url = XvideosXunParser.extractJsonLd(document)?.thumbnailUrl?.firstOrNull()
+            summary = details.duration?.trim()
         }
         return listOf(episode)
     }
@@ -524,34 +474,16 @@ class XvideosXun :
             return parsePlaylistDetail(response).videos.filter { it.isLive() }.map(::playlistVideoToAnime)
         }
         val html = response.body.string()
-        val array = extractJsArray(html, "video_related=") ?: return emptyList()
-        return runCatching { json.decodeFromString<List<PlaylistVideoDto>>(array) }
-            .getOrDefault(emptyList())
-            .filter { it.isLive() }
-            .map(::playlistVideoToAnime)
+        return XvideosXunParser.parseRelatedVideos(html)
+            .filter { !it.deleted && !it.u.isNullOrBlank() }
+            .map(::relatedVideoToAnime)
     }
 
-    /** The JSON array that follows [marker] in a script, found by bracket matching (titles may contain `]`). */
-    private fun extractJsArray(html: String, marker: String): String? {
-        val start = html.indexOf(marker).takeIf { it >= 0 }?.let { html.indexOf('[', it) } ?: return null
-        if (start < 0) return null
-        var depth = 0
-        var inString = false
-        var i = start
-        while (i < html.length) {
-            val c = html[i]
-            when {
-                inString -> when (c) {
-                    '\\' -> i++
-                    '"' -> inString = false
-                }
-                c == '"' -> inString = true
-                c == '[' -> depth++
-                c == ']' -> if (--depth == 0) return html.substring(start, i + 1)
-            }
-            i++
-        }
-        return null
+    private fun relatedVideoToAnime(v: RelatedVideo): SAnime = SAnime.create().apply {
+        url = XvideosXunParser.canonicalVideoPath(v.u!!) ?: v.u.substringBefore('?')
+        title = Parser.unescapeEntities(v.tf ?: v.t ?: v.eid, false)
+        thumbnail_url = v.i
+        author = v.pn
     }
 
     /** uploader / model name (lowercase) → profile path, filled while parsing details pages. */
@@ -569,9 +501,10 @@ class XvideosXun :
 
     override fun videoListParse(response: Response): List<Video> {
         val html = response.body.string()
-        val hls = PLAYER_HLS_REGEX.find(html)?.groupValues?.get(1)
-        val high = PLAYER_HIGH_REGEX.find(html)?.groupValues?.get(1)
-        val low = PLAYER_LOW_REGEX.find(html)?.groupValues?.get(1)
+        val sources = XvideosXunParser.parsePlayerSources(html)
+        val hls = sources.hls
+        val high = sources.high
+        val low = sources.low
 
         val videos = mutableListOf<Video>()
 
@@ -649,65 +582,13 @@ class XvideosXun :
             .build()
     }
 
-    private fun listingItemFromElement(element: Element): SAnime = SAnime.create().apply {
-        val link = element.selectFirst("div.thumb a[href]") ?: element.selectFirst("a[href]")!!
-        val href = link.absUrl("href").ifBlank { baseUrl + link.attr("href") }
-        val canonical = canonicalVideoPath(href)
-        if (canonical != null) url = canonical else setUrlWithoutDomain(href)
-        title = listingTitle(element, link, canonical ?: href)
-        val img = element.selectFirst("img")
-        thumbnail_url = img?.attr("data-src")?.takeIf { it.isNotBlank() } ?: img?.attr("src")
-        author = element.selectFirst("p.metadata span.name, .video-metadata a.name, .video-metadata span.name")
-            ?.text()
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-    }
+    private fun listingItemFromElement(element: Element): SAnime = listingItemToAnime(XvideosXunParser.parseListingItem(element, baseUrl))
 
-    /**
-     * Home, /new and search still use `p.title a[title]` plus `p.metadata span.name`.
-     * /best was redesigned to `div.title[title] > a` plus `.video-metadata a.name`; the thumb
-     * link has no title attribute (and `img alt` is the generic "Video"), so the old
-     * `p.title a` lookup stored a blank title until the details page filled it in.
-     * Anchor text includes child nodes: a translated title can sit in a nested span, so
-     * ownText() is not enough. Never returns a blank string.
-     */
-    private fun listingTitle(element: Element, link: Element, href: String): String {
-        val anchorTitle = listOf("p.title a", "div.title a").firstNotNullOfOrNull { selector ->
-            element.selectFirst(selector)?.attr("title")?.trim()?.takeIf { it.isNotBlank() }
-        }
-        val blockTitle = listOf("div.title", "p.title").firstNotNullOfOrNull { selector ->
-            element.selectFirst(selector)?.attr("title")?.trim()?.takeIf { it.isNotBlank() }
-        }
-        val raw = anchorTitle
-            ?: blockTitle
-            ?: element.selectFirst("p.title a, div.title a")?.text()?.trim()?.takeIf { it.isNotBlank() }
-            ?: element.select("img[alt]").asSequence()
-                .map { it.attr("alt").trim() }
-                .firstOrNull { it.isNotBlank() && !it.equals("Video", ignoreCase = true) }
-            ?: link.attr("title").trim().takeIf { it.isNotBlank() }
-            ?: titleFromSlug(href)
-        return Parser.unescapeEntities(raw, false).trim().ifBlank { titleFromSlug(href) }
-    }
-
-    /** Video slug from [href], underscores turned into spaces. Never blank. */
-    private fun titleFromSlug(href: String): String {
-        val path = href.toHttpUrlOrNull()?.encodedPath ?: href.substringBefore('?').substringBefore('#')
-        val segments = path.trim('/').split('/').filter { it.isNotBlank() }
-        val slug = segments.lastOrNull { segment ->
-            segment != "_" && !segment.all(Char::isDigit) && !segment.startsWith("video.")
-        }
-        val readable = slug?.trimEnd('.')?.replace('_', ' ')?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
-        if (readable.isNotBlank()) return readable
-        return segments.firstOrNull { it.startsWith("video.") }
-            ?.removePrefix("video.")
-            ?.takeIf { it.isNotBlank() }
-            ?: "Video"
-    }
-
-    /** Only keep tiles that point at a video (home page also carries channel/ad tiles). */
-    private fun Element.isVideoBlock(): Boolean {
-        val href = selectFirst("a[href]")?.attr("href") ?: return false
-        return href.contains("/video") || href.contains("/prof-video-click")
+    private fun listingItemToAnime(item: ListingItem): SAnime = SAnime.create().apply {
+        url = item.href
+        title = item.title
+        thumbnail_url = item.thumb
+        author = item.author
     }
 
     // ========================= Favorites lists ============================
@@ -840,24 +721,6 @@ class XvideosXun :
         }
     }
 
-    private fun extractJsonLd(document: Document): VideoLdDto? {
-        for (script in document.select("script[type=application/ld+json]")) {
-            val text = script.data().trim()
-            if (!text.contains("VideoObject")) continue
-            runCatching { json.decodeFromString<VideoLdDto>(text) }.getOrNull()?.let { return it }
-        }
-        return null
-    }
-
-    @Serializable
-    private data class VideoLdDto(
-        val name: String? = null,
-        val description: String? = null,
-        val thumbnailUrl: List<String>? = null,
-        val uploadDate: String? = null,
-        val duration: String? = null,
-    )
-
     @Serializable
     private data class ProfileVideosDto(
         @SerialName("nb_videos") val nbVideos: Int = 0,
@@ -941,17 +804,11 @@ class XvideosXun :
     )
 
     companion object {
-        private const val LISTING_SELECTOR = "div.mozaique div.thumb-block, div#content div.thumb-block"
-        private const val NEXT_PAGE_SELECTOR = "a.next-page, .pagination a.next, .pagination li.next a"
-
         private val ACCOUNT_SECTIONS = setOf("videos-i-like", "watch-later", "history")
         private val PROFILE_PREFIXES = setOf("channels", "models", "pornstars", "profiles", "amateur-channels", "model-channels", "webcam-models")
 
         private const val LOGIN_HINT = "请先登录：在本源的浏览页点击右上角「在 WebView 中打开」，登录 XVideos 账户后返回重试"
 
-        private val PLAYER_HLS_REGEX = Regex("""html5player\.setVideoHLS\('([^']+)'\)""")
-        private val PLAYER_HIGH_REGEX = Regex("""html5player\.setVideoUrlHigh\('([^']+)'\)""")
-        private val PLAYER_LOW_REGEX = Regex("""html5player\.setVideoUrlLow\('([^']+)'\)""")
         private val QUALITY_NUMBER_REGEX = Regex("""(\d{3,4})p""")
         private val FAVORITE_PATH_REGEX = Regex("""/(favorite|playlist)/(\d+)""")
         private const val PLAYLISTS_API = "/api/playlists"
