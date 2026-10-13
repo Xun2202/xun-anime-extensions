@@ -98,6 +98,35 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 - 分类 id（`FN_CAT`）失败、退回写死分类时打 `Log.w`。详情里的 `moreSeries` 并进相关视频。
 - 测试：`RouXunServerFnsTest`（14）+ `SerovalTest`（5）+ `RouXunLiveCanaryTest`（在线，默认不跑）。
 
+### Hanime1.me Xun — `src/zh/hanime1xun`（v8，APK 14.8）
+
+改自 [yuzono/anime-extensions](https://github.com/yuzono/anime-extensions) 的 `src/zh/hanime1` v7（Apache-2.0，说明在该目录的 `NOTICE`）。界面上的源名称仍是 **Hanime1.me**，语言 `zh`，没有改 `versionId`。Anikku 用 `MD5("hanime1.me/zh/1")` 的前 64 位（符号位清掉）当源 id，结果是 `2853734405579058222`，和原版一样。
+
+和原版的差别：
+
+- **横版、竖版卡片都解析**。3DCG 这类结果是横版 `.video-item-container`，裏番是竖版 `.search-videos`。按页面上的顺序收录，同一 URL 只留一条。`target=_blank`，或者链接不是本站 `/watch` 的赞助商，丢掉。
+- **搜尋作者**（筛选里的勾选）会带 `type=artist`。作者卡变成一个作者合集，地址是 `/search?query=<作者名>`，可以加入书架。合集里每一部影片是一集，顺序跟站上一样、最新在前；作者发新片时，更新书架会多出一集。详情里写「作者合集：N 部影片」。普通影片详情页的作者名不动，在 Anikku 里点作者名仍然是用这个名字做关键词搜索。
+- **分集**：视频页上的类型是裏番或泡麵番时，侧栏播放列表仍是这一部的各集。3DCG、MMD、2D動畫等其他类型只保留当前这一个 `watch?v=`，不再把「同作者的其他作品」当成剧集。页面上读不到类型时，仍按原版把整份播放列表当成分集。
+- 有下一页：原来的 `rel=next`，以及文字是「下一頁」且链接不是 `#` 的跳页按钮。没选类型时请求里仍然不带 `genre`。类型下拉的后备名单改成站上的繁体名（泡麵番、3DCG、2.5D 等）。
+
+安装：
+
+1. **先卸载原来的 Hanime1.me 扩展，再装本版。** 源 id 相同，书架和观看记录会留着。两个同时装会冲突。
+2. 仓库地址和上面一样。本扩展的包名是 `eu.kanade.tachiyomi.animeextension.zh.hanime1xun`。
+
+已知限制：
+
+- 站点自己的收录就不全。例如搜 vicineko，站上是 17 部，合集里也就是这 17 部。
+- 想支持正版，请走作者本人的 Patreon / SubscribeStar。
+- 站点有 Cloudflare。扩展仍依赖 App 里的 WebView 拦截，这一点和原版一样。
+- 作者合集最多翻 30 页。
+
+单元测试（不访问网站）：
+
+```bash
+./gradlew :src:zh:hanime1xun:testDebugUnitTest
+```
+
 ## 鲁棒性 / 金丝雀
 
 2026-10-13 按「全做」落地（`a9463c9` … `767dabf`，9 个提交）。目标：网站改版时不要再静默显示空标题 / 空列表，而是当场告诉用户去更新插件；同时在 GitHub 上每天自动看一眼公开页面，坏了先开 issue。
