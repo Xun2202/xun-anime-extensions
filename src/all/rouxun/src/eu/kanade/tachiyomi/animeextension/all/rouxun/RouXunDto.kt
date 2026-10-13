@@ -19,6 +19,7 @@ internal data class VideoDetailResult(
     val relatedVideos: List<VideoDto> = emptyList(),
     val series: SeriesDto? = null,
     val episodes: List<VideoDto>? = null,
+    val moreSeries: List<SeriesDto> = emptyList(),
     val ev: EncodedVideoUrl? = null,
 )
 

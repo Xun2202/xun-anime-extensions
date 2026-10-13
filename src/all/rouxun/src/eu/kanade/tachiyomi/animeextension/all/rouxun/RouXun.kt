@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.all.rouxun
 
 import android.util.Base64
+import android.util.Log
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animeextension.all.rouxun.BrowseFilter.Companion.BROWSE_HOME
@@ -14,16 +15,18 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.HttpException
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -44,6 +47,8 @@ import kotlin.concurrent.thread
  * shows nothing. This one calls the same server functions the site's own JS calls
  * (`/_serverFn/<id>?payload=…`, seroval-encoded) and plays video through [HlsProxy], because
  * the HLS playlist and segments are disguised as PNG files that mpv/ffmpeg cannot read directly.
+ * The ids are read from the current `index-*.js` ([RouXunServerFns]); baked-in constants are only
+ * a fallback for when that bundle cannot be parsed.
  */
 class RouXun :
     AnimeHttpLegacySource(),
@@ -84,47 +89,128 @@ class RouXun :
 
     private val proxy by lazy { HlsProxy(client, headers) }
 
-    // ============================ Server functions =========================
-
-    private fun fnRequest(fnId: String, data: JsonObject?): Request {
-        val url = baseUrl.toHttpUrl().newBuilder()
-            .addPathSegment("_serverFn")
-            .addPathSegment(fnId)
-            .addEncodedQueryParameter("payload", URLEncoder.encode(Seroval.encodePayload(data), "UTF-8"))
-            .build()
-        return GET(url, fnHeaders)
+    private val catalog by lazy {
+        ServerFnCatalog(
+            discoverFromNetwork = { RouXunServerFns.fetchDiscovered(client, headers) },
+            readCache = ::readFnCache,
+            writeCache = ::writeFnCache,
+        )
     }
 
-    private fun Response.isFn(fnId: String) = request.url.pathSegments.getOrNull(1) == fnId
+    // ============================ Server functions =========================
+
+    private fun fnRequest(key: FnKey, data: JsonObject?, page: Int? = null): Request {
+        val resolved = catalog.resolve(key)
+        val url = baseUrl.toHttpUrl().newBuilder()
+            .addPathSegment("_serverFn")
+            .addPathSegment(resolved.id)
+            .addEncodedQueryParameter("payload", URLEncoder.encode(Seroval.encodePayload(data), "UTF-8"))
+            .build()
+        return GET(url, fnHeaders).newBuilder()
+            .tag(FnCall::class.java, FnCall(key, page, resolved.epoch))
+            .build()
+    }
+
+    /** Swaps in the id from [seenEpoch]'s successor. One retry; the tag keeps the page and the key. */
+    private fun Request.withFnId(fnId: String): Request {
+        val url = url.newBuilder().setPathSegment(1, fnId).build()
+        return newBuilder().url(url).build()
+    }
+
+    private suspend fun executeFn(request: Request): Response = withContext(Dispatchers.IO) {
+        executeFnBlocking(request)
+    }
+
+    private fun executeFnBlocking(request: Request): Response {
+        val call = request.tag(FnCall::class.java)
+        val seen = call?.epoch ?: catalog.epoch
+        val first = client.newCall(request).execute()
+        if (!first.isStaleServerFn()) return first.requireSuccess()
+        first.close()
+        Log.w(LOG_TAG, "serverFn ${call?.key ?: "?"} returned HTTP 500 without x-tss-serialized; rediscovering")
+        catalog.refreshIfStale(seen)
+        val retry = call?.let { request.withFnId(catalog.resolve(it.key).id) } ?: request
+        val second = client.newCall(retry).execute()
+        if (second.isStaleServerFn()) {
+            second.close()
+            throw Exception(RouXunServerFns.MSG_SCRIPT_CHANGED)
+        }
+        return second.requireSuccess()
+    }
+
+    private fun Response.requireSuccess(): Response {
+        if (isSuccessful) return this
+        val code = code
+        close()
+        throw HttpException(code)
+    }
+
+    private fun Response.fnKey(): FnKey? {
+        request.tag(FnCall::class.java)?.key?.let { return it }
+        val segment = request.url.pathSegments.getOrNull(1) ?: return null
+        return FnKey.entries.firstOrNull { key ->
+            catalog.resolve(key).id == segment || RouXunServerFns.FALLBACK[key] == segment
+        }
+    }
+
+    private fun Response.listedPage(): Int = request.tag(FnCall::class.java)?.page ?: 1
 
     private inline fun <reified T> Response.fnResult(): T = use {
-        val root = Seroval.decode(json.parseToJsonElement(body.string())).jsonObject
+        val root = try {
+            Seroval.decode(json.parseToJsonElement(body.string())) as? JsonObject
+        } catch (e: Exception) {
+            throw Exception(RouXunServerFns.MSG_FORMAT_CHANGED, e)
+        } ?: throw Exception(RouXunServerFns.MSG_FORMAT_CHANGED)
         root["error"]?.let { error ->
             if (error is JsonObject || (error is JsonPrimitive && error.isString)) {
                 throw Exception("rou.video 返回错误：$error")
             }
         }
         val result = root["result"]?.takeUnless { it is JsonNull } ?: throw Exception("rou.video 没有返回数据")
-        json.decodeFromJsonElement<T>(result)
+        try {
+            json.decodeFromJsonElement<T>(result)
+        } catch (e: Exception) {
+            throw Exception(RouXunServerFns.MSG_FORMAT_CHANGED, e)
+        }
+    }
+
+    private fun readFnCache(): Map<FnKey, String>? {
+        val raw = preferences.getString(PREF_SERVER_FNS, null) ?: return null
+        if (raw.isEmpty()) return null
+        return buildMap {
+            for (line in raw.lineSequence()) {
+                val eq = line.indexOf('=')
+                if (eq <= 0) continue
+                val key = runCatching { FnKey.valueOf(line.substring(0, eq)) }.getOrNull() ?: continue
+                put(key, line.substring(eq + 1))
+            }
+        }
+    }
+
+    private fun writeFnCache(ids: Map<FnKey, String>) {
+        val raw = ids.entries.joinToString("\n") { (key, id) -> "$key=$id" }
+        preferences.edit().putString(PREF_SERVER_FNS, raw).apply()
     }
 
     private fun idData(id: String) = buildJsonObject { put("id", id) }
 
     private fun listRequest(page: Int, order: String) = fnRequest(
-        FN_VIDEO_LIST,
+        FnKey.VIDEO_LIST,
         buildJsonObject {
             put("page", page)
             put("order", order)
         },
+        page,
     )
 
     private fun tagRequest(tag: String, page: Int, order: String) = fnRequest(
-        FN_TAG,
+        FnKey.TAG,
         buildJsonObject {
             put("id", tag)
             put("page", page)
             put("order", order)
         },
+        page,
     )
 
     // ============================== Popular ===============================
@@ -134,7 +220,13 @@ class RouXun :
         return listRequest(page, SORT_VIEWS)
     }
 
-    override fun popularAnimeParse(response: Response): AnimesPage = response.fnResult<VideoListResult>().toPage()
+    override suspend fun getPopularAnime(page: Int): AnimesPage = executeFn(popularAnimeRequest(page)).let { popularAnimeParse(it) }
+
+    override fun popularAnimeParse(response: Response): AnimesPage {
+        val result = response.fnResult<VideoListResult>()
+        ensureListing(response.listedPage(), result.videos.size, rejectEmptyFirstPage = true)
+        return result.toPage()
+    }
 
     // =============================== Latest ===============================
 
@@ -142,6 +234,8 @@ class RouXun :
         fetchTaxonomyOnce()
         return listRequest(page, SORT_LATEST)
     }
+
+    override suspend fun getLatestUpdates(page: Int): AnimesPage = executeFn(latestUpdatesRequest(page)).let { latestUpdatesParse(it) }
 
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
@@ -159,19 +253,19 @@ class RouXun :
             return getSearchAnime(page, "$kind:$item", filters)
         }
         if (trimmed.startsWith(PREFIX_VIDEO)) {
-            val detail = client.newCall(fnRequest(FN_VIDEO_DETAIL, idData(trimmed.removePrefix(PREFIX_VIDEO))))
-                .awaitSuccess().fnResult<VideoDetailResult>()
+            val detail = executeFn(fnRequest(FnKey.VIDEO_DETAIL, idData(trimmed.removePrefix(PREFIX_VIDEO))))
+                .fnResult<VideoDetailResult>()
             rememberTags(detail.video)
             return AnimesPage(listOf(detail.video.toSAnime()), false)
         }
         if (trimmed.startsWith(PREFIX_SERIES)) {
-            val detail = client.newCall(fnRequest(FN_SERIES_DETAIL, idData(trimmed.removePrefix(PREFIX_SERIES))))
-                .awaitSuccess().fnResult<SeriesDetailResult>()
+            val detail = executeFn(fnRequest(FnKey.SERIES_DETAIL, idData(trimmed.removePrefix(PREFIX_SERIES))))
+                .fnResult<SeriesDetailResult>()
             return AnimesPage(listOf(detail.series.toSAnime()), false)
         }
         if (trimmed.startsWith(PREFIX_TAG)) {
-            return client.newCall(tagRequest(trimmed.removePrefix(PREFIX_TAG), page, SORT_LATEST))
-                .awaitSuccess().fnResult<VideoListResult>().toPage()
+            return executeFn(tagRequest(trimmed.removePrefix(PREFIX_TAG), page, SORT_LATEST))
+                .fnResult<VideoListResult>().toPage()
         }
 
         fetchTaxonomyOnce()
@@ -184,9 +278,9 @@ class RouXun :
 
         if (keyword.isNotEmpty()) {
             val tab = if (browse == BROWSE_SERIES) "series" else "video"
-            val result = client.newCall(
+            val result = executeFn(
                 fnRequest(
-                    FN_SEARCH,
+                    FnKey.SEARCH,
                     buildJsonObject {
                         put("q", keyword)
                         put("t", tag)
@@ -194,8 +288,9 @@ class RouXun :
                         put("page", page)
                         put("tab", tab)
                     },
+                    page,
                 ),
-            ).awaitSuccess().fnResult<VideoListResult>()
+            ).fnResult<VideoListResult>()
             result.hotSearches?.let(::rememberHotSearches)
             return if (tab == "series") {
                 AnimesPage(result.seriesList.map { it.toSAnime() }, result.hasNextPage)
@@ -207,7 +302,7 @@ class RouXun :
         val order = sort.ifEmpty { SORT_LATEST }
         return when (browse) {
             BROWSE_HOME -> {
-                val home = client.newCall(fnRequest(FN_HOME, null)).awaitSuccess().fnResult<HomeResult>()
+                val home = executeFn(fnRequest(FnKey.HOME, null)).fnResult<HomeResult>()
                 val videos = home.allVideos().let { videos ->
                     when (order) {
                         SORT_VIEWS -> videos.sortedByDescending { it.viewCount }
@@ -215,6 +310,8 @@ class RouXun :
                         else -> videos.sortedByDescending { it.createdAt.orEmpty() }
                     }
                 }
+                // All nine home lists empty is the same failure as a popular page with no rows.
+                ensureListing(page = 1, count = videos.size, rejectEmptyFirstPage = true)
                 AnimesPage(videos.map { it.toSAnime() }, false)
             }
             BROWSE_WATCHING -> {
@@ -223,22 +320,28 @@ class RouXun :
                 AnimesPage(videos.map { it.toSAnime() }, false)
             }
             BROWSE_SERIES -> {
-                val result = client.newCall(
+                val result = executeFn(
                     fnRequest(
-                        FN_SERIES_LIST,
+                        FnKey.SERIES_LIST,
                         buildJsonObject {
                             put("f", filters.filterOf<SeriesStatusFilter>()?.selectedValue ?: "all")
                             put("s", filters.filterOf<SeriesSortFilter>()?.selectedValue ?: "updated")
                             put("page", page)
                             put("tag", tag)
                         },
+                        page,
                     ),
-                ).awaitSuccess().fnResult<SeriesListResult>()
+                ).fnResult<SeriesListResult>()
                 AnimesPage(result.list.map { it.toSAnime() }, result.hasNextPage)
             }
             else -> {
                 val request = if (tag.isNotEmpty()) tagRequest(tag, page, order) else listRequest(page, order)
-                client.newCall(request).awaitSuccess().fnResult<VideoListResult>().toPage()
+                val result = executeFn(request).fnResult<VideoListResult>()
+                // Untagged browse is the same listing as popular / latest. Tag filters may be empty.
+                if (request.tag(FnCall::class.java)?.key == FnKey.VIDEO_LIST) {
+                    ensureListing(request.tag(FnCall::class.java)?.page ?: 1, result.videos.size, rejectEmptyFirstPage = true)
+                }
+                result.toPage()
             }
         }
     }
@@ -283,9 +386,12 @@ class RouXun :
     private fun fetchTaxonomyOnce() {
         if (taxonomy != null || !taxonomyFetchStarted.compareAndSet(false, true)) return
         thread(isDaemon = true, name = "rouxun-taxonomy") {
-            runCatching { client.newCall(fnRequest(FN_CAT, null)).execute().fnResult<CatResult>().taxonomy }
+            runCatching { executeFnBlocking(fnRequest(FnKey.CAT, null)).fnResult<CatResult>().taxonomy }
                 .onSuccess { taxonomy = it }
-                .onFailure { taxonomyFetchStarted.set(false) }
+                .onFailure { error ->
+                    Log.w(LOG_TAG, "FN_CAT failed; using built-in categories", error)
+                    taxonomyFetchStarted.set(false)
+                }
         }
     }
 
@@ -308,13 +414,15 @@ class RouXun :
 
     // =========================== Anime Details ============================
 
+    override suspend fun getAnimeDetails(anime: SAnime): SAnime = executeFn(animeDetailsRequest(anime)).let { animeDetailsParse(it) }
+
     override fun animeDetailsRequest(anime: SAnime): Request {
         val (kind, id) = anime.url.parseEntryUrl()
-        return if (kind == KIND_SERIES) fnRequest(FN_SERIES_DETAIL, idData(id)) else fnRequest(FN_VIDEO_DETAIL, idData(id))
+        return if (kind == KIND_SERIES) fnRequest(FnKey.SERIES_DETAIL, idData(id)) else fnRequest(FnKey.VIDEO_DETAIL, idData(id))
     }
 
     override fun animeDetailsParse(response: Response): SAnime {
-        if (response.isFn(FN_SERIES_DETAIL)) {
+        if (response.fnKey() == FnKey.SERIES_DETAIL) {
             return response.fnResult<SeriesDetailResult>().series.toSAnime()
         }
         val detail = response.fnResult<VideoDetailResult>()
@@ -324,20 +432,28 @@ class RouXun :
 
     override fun relatedAnimeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
 
+    override suspend fun fetchRelatedAnimeList(anime: SAnime): List<SAnime> = executeFn(relatedAnimeListRequest(anime)).let { relatedAnimeListParse(it) }
+
     override fun relatedAnimeListParse(response: Response): List<SAnime> {
-        if (response.isFn(FN_SERIES_DETAIL)) {
+        if (response.fnKey() == FnKey.SERIES_DETAIL) {
             return response.fnResult<SeriesDetailResult>().more.map { it.toSAnime() }
         }
         val detail = response.fnResult<VideoDetailResult>()
-        return listOfNotNull(detail.series?.toSAnime()) + detail.relatedVideos.map { it.toSAnime() }
+        return buildList {
+            detail.series?.let { add(it.toSAnime()) }
+            detail.moreSeries.forEach { add(it.toSAnime()) }
+            detail.relatedVideos.forEach { add(it.toSAnime()) }
+        }.distinctBy { it.url }
     }
 
     // ============================== Episodes ==============================
 
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> = executeFn(episodeListRequest(anime)).let { episodeListParse(it) }
+
     override fun episodeListRequest(anime: SAnime): Request = animeDetailsRequest(anime)
 
     override fun episodeListParse(response: Response): List<SEpisode> {
-        if (response.isFn(FN_SERIES_DETAIL)) {
+        if (response.fnKey() == FnKey.SERIES_DETAIL) {
             val detail = response.fnResult<SeriesDetailResult>()
             return detail.episodes
                 .sortedByDescending { it.episode ?: 0f }
@@ -351,7 +467,7 @@ class RouXun :
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         val (_, id) = episode.url.parseEntryUrl()
-        val detail = client.newCall(fnRequest(FN_VIDEO_DETAIL, idData(id))).awaitSuccess().fnResult<VideoDetailResult>()
+        val detail = executeFn(fnRequest(FnKey.VIDEO_DETAIL, idData(id))).fnResult<VideoDetailResult>()
         val hlsPath = detail.ev?.let { ev ->
             runCatching { json.decodeFromString<VideoUrls>(decodeEv(ev)).videoUrl }.getOrNull()
         } ?: "/api/hls/$id"
@@ -467,17 +583,10 @@ class RouXun :
 
     private fun String?.toDate(): Long = this?.let { runCatching { DATE_FORMAT.parse(it.trim())?.time }.getOrNull() } ?: 0L
 
+    private data class FnCall(val key: FnKey, val page: Int?, val epoch: Int)
+
     companion object {
-        // Server-function ids are hashes of the route file + export; they change only when the
-        // site's source layout changes. Captured from https://rou.video/assets/index-*.js.
-        private const val FN_VIDEO_LIST = "e61b4025d09a39a538e2a98200c722a8aac61a91fe3c24069b22b6995cca358c"
-        private const val FN_VIDEO_DETAIL = "74554e0f1bc953cd9ba961827420d087df3ba658600b3e3851bb2534a7f8151f"
-        private const val FN_TAG = "c84377bc729812c8b0f1a090029dab1cc3eaa54d8244077638856530c838af3f"
-        private const val FN_SEARCH = "b3cc132b712a986cd50504d429446dda22b20e0a6d3353d9bf129015218dad3c"
-        private const val FN_HOME = "d35808569a69e11e7268ab35797d3a3912cd11db0a3c079cd1bdcff8891a80ed"
-        private const val FN_CAT = "173c4c582796c7514195728e9ec7460dfeddbb50e5c886c7ac6e690302df61aa"
-        private const val FN_SERIES_LIST = "efb21a4b20fbf5718f45417571e1cc66d2a22946338aeeee62ff162e19b95c4c"
-        private const val FN_SERIES_DETAIL = "2b8ad32189617e753416c128487a55971d2bf9367af80897e9e72aed49829fb5"
+        private const val LOG_TAG = "RouXun"
 
         private const val SORT_LATEST = "createdAt"
         private const val SORT_VIEWS = "viewCount"
@@ -497,6 +606,7 @@ class RouXun :
         private const val TITLE_TRADITIONAL = "zh-Hant"
         private const val PREF_SAVED_TAGS = "saved_tags"
         private const val PREF_HOT_SEARCHES = "hot_searches"
+        private const val PREF_SERVER_FNS = "server_fn_ids"
 
         private val DATE_FORMAT by lazy {
             SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ENGLISH).apply { timeZone = TimeZone.getTimeZone("UTC") }
