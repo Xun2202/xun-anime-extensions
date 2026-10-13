@@ -16,7 +16,7 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 
 ## 扩展列表
 
-### XvXun（定制版 Xvideos）— `src/all/xvideosxun`
+### XvXun（定制版 Xvideos）— `src/all/xvideosxun`（v11，APK 14.11）
 
 相比官方仓库里的 Xvideos 扩展多出：
 
@@ -52,7 +52,19 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 
 不做"在设置里填账号密码自动登录"：站点登录带人机验证和反爬，扩展无法可靠通过；把密码明文存进扩展设置也不安全。WebView 登录一次即可长期有效。
 
-### RouXun（rou.video / 肉視頻 重做版）— `src/all/rouxun`
+#### v11（2026-10-13）
+
+网站一改版，旧选择器会静默给出空标题或空列表。v11 把解析抽出来，对不上就当场说明原因，并修掉「打开过 WebView 就被当成已登录」：
+
+- HTML / JSON 解析在 `XvideosXunParser.kt`（纯 Kotlin，没有 android import；选择器和正则集中在一处）。
+- 砖块多于 0、但主标题选择器命中率低于 50%：抛「网站可能已改版，请更新 XvXun 插件（标题标记不匹配）」。
+- 热门 / 最新 / 分类 / 标签的第 1 页是 0 条、又不是登录墙：抛「…（没有找到视频列表）」。搜索和收藏夹 0 条是合法的，不报。
+- 播放地址三条正则都空时，用页面 `ld+json` 里的 `contentUrl` 兜底。
+- 页面上有 `video_related=` 但 JSON 解不出来：抛「…（相关视频数据不匹配）」。
+- 登录判断不再看有没有 `session_token` cookie（没登录的访问也会下发同名 cookie，所以打开过 WebView 就被当成已登录，筛选器卡在「正在加载」）。改为以收藏夹 API 的 `metadata.isLogged` 为准，进程内缓存，cookie 一变就失效。没登录时筛选器显示「（未登录）」。曾经加过的「登录」开关设置项已去掉（cookie 变化会自动失效，开关多余）。
+- 合成夹具测试 `XvideosXunParserTest`（13 个）+ 在线检查 `XvideosXunLiveCanaryTest`（默认不跑，见下面「金丝雀」）。
+
+### RouXun（rou.video / 肉視頻 重做版）— `src/all/rouxun`（v2，APK 14.2）
 
 官方仓库的 RouVideo 扩展在 2026-10 之后**完全没有数据**：rou.video 从 Next.js（页面里带 `script#__NEXT_DATA__`）换成了 TanStack Start 服务端渲染，旧扩展依赖的那段 JSON 不存在了。本扩展是独立的新插件（可与官方 RouVideo 并存，书架条目互不影响），完全改用站点自己的接口：
 
@@ -65,7 +77,71 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
   - 分类（站点 6 大类）、标签（站内全部子分类 + 题材标签，后台自动加载）、热门搜索；剧集状态 / 剧集排序只对剧集库生效
 - **链接直达**：在浏览器打开 `https://rou.video/v/…`、`/s/…`、`/t/…` 可选用 Anikku 打开；搜索框里直接粘贴这类链接也可以
 - **设置**：标题 / 标签使用站点提供的简体版（默认）还是繁体原文
-- 已知限制：站点每个视频只有一个画质；服务端函数的 id 是站点源码的哈希，站点大改版时需要重新抓取（见 `RouXun.kt` 的 `companion object`）
+- 已知限制：站点每个视频只有一个画质。服务端函数的 id 是站点脚本里的哈希；v2 起启动时会自己从主脚本里找（见下），文件里的 8 个常量只做后备。大改版若连查找规则都不适用，会提示更新插件。
+
+#### v2（2026-10-13）
+
+- 新文件 `RouXunServerFns.kt`：启动时，以及碰到 HTTP 500 时，从 `https://rou.video/` 找 `/assets/index-*.js`，按 `import("./<路由>-<hash>.js")` 后 200 字符内的 `ut("<64 位十六进制>")` 配对 7 个 id；视频详情的 id 取 `atob` 解码函数后面紧挨着的那个 `ut`。文件里写死的 8 个常量只在发现失败时用。配齐后存 `SharedPreferences`（键 `server_fn_ids`）。同一次启动（同一 epoch）只下载一次，`synchronized` 单飞。
+- HTTP 500 且响应里没有 `x-tss-serialized`：重新发现并重试一次；还失败就抛「站点脚本已变化，请更新 RouXun 插件」。
+- 热门 / 最新 / 首页精选的第 1 页是 0 条：抛「站点数据格式可能已变化，请更新 RouXun 插件」。
+- 分类 id（`FN_CAT`）失败、退回写死分类时打 `Log.w`。详情里的 `moreSeries` 并进相关视频。
+- 测试：`RouXunServerFnsTest`（14）+ `SerovalTest`（5）+ `RouXunLiveCanaryTest`（在线，默认不跑）。
+
+## 鲁棒性 / 金丝雀
+
+2026-10-13 按「全做」落地（`a9463c9` … `767dabf`，9 个提交）。目标：网站改版时不要再静默显示空标题 / 空列表，而是当场告诉用户去更新插件；同时在 GitHub 上每天自动看一眼公开页面，坏了先开 issue。
+
+### 解析层
+
+- **XvXun**：列表、详情、播放地址、相关视频的 HTML / JSON 解析在 `src/all/xvideosxun/src/.../XvideosXunParser.kt`。这个文件不 import Android，选择器和正则是集中的常量。扩展类只负责发请求、把字节交给解析器。改版时先改这里，再补一条夹具。
+- **RouXun**：列表数据本来就不是 HTML。服务端函数 id 的发现在 `RouXunServerFns.kt`，payload 编解码仍在 `Seroval.kt`。写死的 8 个 id 是后备，不是主路径。
+
+健康检查抛出的原文（给用户看的）见上面 v11 / v2。搜索 0 条、收藏夹 0 条、超大页码 0 条不算改版。
+
+### 单元测试怎么跑
+
+测试不能放进 `src/test`：`src/` 整个就是 main 源集。`gradle/build-logic` 的 `PluginExtensionLegacy` 把测试源集指到模块目录的 `test/`，资源指到 `test-resources/`，测试类路径是 `testImplementation(libs.bundles.common)` 加 JUnit。
+
+本机（不访问网站，live 两条会跳过）：
+
+```bash
+./gradlew :src:all:xvideosxun:testDebugUnitTest :src:all:rouxun:testDebugUnitTest
+```
+
+2026-10-13 本机 34 个用例全过（其中 2 个 `*LiveCanaryTest` 因没设 `CANARY_LIVE` 而跳过）。
+
+要在本机打真实网站（会用你的网络）：
+
+```bash
+CANARY_LIVE=1 ./gradlew \
+  :src:all:xvideosxun:testDebugUnitTest \
+  :src:all:rouxun:testDebugUnitTest \
+  --tests '*LiveCanary*'
+```
+
+当时本机结果：XvXun 首页 48/48、最新 27/27、热门 27/27 标题命中，详情的 hls / high / low / contentUrl 都有，相关 40 条；RouXun 发现的 8 个 id 与文件里的常量一致，第 1 页 26 条全有标题。
+
+### 金丝雀怎么工作
+
+定义在 [`.github/workflows/canary.yml`](./.github/workflows/canary.yml)。**只在 GitHub Actions 上跑，不在用户手机上，不耗用户流量。**
+
+- 每天 UTC 02:17（北京 10:17），也可以在 Actions 里手动触发。
+- 设 `CANARY_LIVE=1`，只跑两个 `*LiveCanaryTest`：抓几页公开页面，用插件自己的解析器做断言。
+- 站点不可达，或者返回 Cloudflare 挑战页：该用例记为 skipped，**不算失败**。
+- 定时运行要**连续两次**失败才开 issue。标题固定为 `[canary] XvXun / RouXun 解析器与站点当前结构不匹配`，标签 `canary`。中间只失败一次（站点抽风）不会开。
+- 已经开着的同题 issue 上，后续失败会再评论一次，不重复开。
+- 恢复通过后，定时运行自动评论并关闭该 issue。手动触发的成功运行不负责开关 issue（只有 `schedule` 事件会）。
+- 测试报告上传为 artifact `canary-test-reports`，保留 14 天。
+
+2026-10-13：`Build & publish repo` run 38363628954 成功，`repo` 分支索引已是 XvXun 14.11 / RouXun 14.2。手动触发的 `Canary` run 38363695647 成功，两条 live 用例在 GitHub runner 上真实执行（skipped=0，说明两个站点当时都能从 GitHub 访问）。
+
+### 改版时的排查步骤
+
+1. 看用户看到的那句原文，或 `[canary]` issue 里失败用例的名字：标题标记、没有视频列表、相关视频、站点脚本已变化、站点数据格式，对应上面的检查点。
+2. 用浏览器或 `curl` 打开出问题的公开页（首页、最新、热门、一条详情；RouXun 再加首页 HTML 里的 `/assets/index-*.js`），对照 `XvideosXunParser` 的选择器 / 正则，或 `RouXunServerFns` 的 `import("./…")` + `ut("…")` 配对规则。
+3. 把新页面存成 `test-resources/` 里的夹具，先让对应的单元测试红，再改解析器让它绿。`extVersionCode` +1。
+4. 本机 `CANARY_LIVE=1` 跑一遍 `*LiveCanary*`，确认不是只对夹具过。
+5. push 到 `main`（自动构建发布），再在 Actions 里手动跑一次 Canary。定时检查通过后，开着的 `[canary]` issue 会在下一次定时运行时自动关掉。
 
 ## 开发
 
