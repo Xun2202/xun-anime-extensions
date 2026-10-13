@@ -64,7 +64,7 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 - 登录判断不再看有没有 `session_token` cookie（没登录的访问也会下发同名 cookie，所以打开过 WebView 就被当成已登录，筛选器卡在「正在加载」）。改为以收藏夹 API 的 `metadata.isLogged` 为准，进程内缓存，cookie 一变就失效。没登录时筛选器显示「（未登录）」。曾经加过的「登录」开关设置项已去掉（cookie 变化会自动失效，开关多余）。
 - 合成夹具测试 `XvideosXunParserTest`（13 个）+ 在线检查 `XvideosXunLiveCanaryTest`（默认不跑，见下面「金丝雀」）。
 
-### RouXun（rou.video / 肉視頻 重做版）— `src/all/rouxun`（v3，APK 14.3）
+### RouXun（rou.video / 肉視頻 重做版）— `src/all/rouxun`（v4，APK 14.4）
 
 官方仓库的 RouVideo 扩展在 2026-10 之后**完全没有数据**：rou.video 从 Next.js（页面里带 `script#__NEXT_DATA__`）换成了 TanStack Start 服务端渲染，旧扩展依赖的那段 JSON 不存在了。本扩展是独立的新插件（可与官方 RouVideo 并存，书架条目互不影响），完全改用站点自己的接口：
 
@@ -78,6 +78,11 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 - **链接直达**：在浏览器打开 `https://rou.video/v/…`、`/s/…`、`/t/…` 可选用 Anikku 打开；搜索框里直接粘贴这类链接也可以
 - **设置**：标题 / 标签使用站点提供的简体版（默认）还是繁体原文
 - 已知限制：站点每个视频只有一个画质。服务端函数的 id 是站点脚本里的哈希；v2 起启动时会自己从主脚本里找（见下），文件里的 8 个常量只做后备。大改版若连查找规则都不适用，会提示更新插件。
+
+#### v4（2026-10-13）
+
+- 修正片「加载一段时间后 loading failed」：本地代理用 `InetAddress.getLoopbackAddress()` 监听，而 Android 上它固定返回 IPv6 的 `::1`；播放列表写的是 `http://127.0.0.1:…`，播放器连 IPv4 被拒绝（模拟器日志 `Connection to tcp://127.0.0.1:… failed: Connection refused`，随后 `loading failed`）。桌面 JVM 的回环是 IPv4，所以以前的测试看不出来。现在固定监听字面量 `127.0.0.1`。
+- 测试：`HlsProxyTest` 新增子进程用例（打开 `java.net.preferIPv6Addresses=true`，与 Android 同样的绑定行为），以及「`keep-alive` + `Range: bytes=0-` 拿到完整分片、`Content-Length` 与字节数一致」的原始套接字用例。本机 ffmpeg 经代理拷贝 30 秒、从 120 秒处 seek 都正常。
 
 #### v3（2026-10-13）
 
