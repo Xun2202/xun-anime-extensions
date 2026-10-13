@@ -84,20 +84,26 @@ const val ACCOUNT_PLAYLISTS = "account/playlists"
  * One of the logged-in user's favorites lists, expanded so that every video is its own entry
  * (long-press → bulk select → add to library gives one library entry per video).
  * [lists] is null until the background fetch finishes.
+ * [statusMessage] is a finished failure ("未登录" or the error text), not the loading placeholder.
  */
-class MyListVideosFilter(lists: List<Pair<String, Long>>?, loggedIn: Boolean) :
-    SelectFilter(
-        "我的某个收藏夹 → 每个视频一个条目",
-        buildList {
-            add("不使用" to "")
-            when {
-                lists == null && !loggedIn -> add("（需先在 WebView 登录）" to "")
-                lists == null -> add("（正在加载收藏夹列表，稍等几秒后点「重置」）" to "")
-                lists.isEmpty() -> add("（这个账户还没有收藏夹）" to "")
-                else -> lists.forEach { (name, id) -> add(name to id.toString()) }
-            }
-        },
-    )
+class MyListVideosFilter(
+    lists: List<Pair<String, Long>>?,
+    loggedIn: Boolean,
+    statusMessage: String? = null,
+    listsPending: Boolean = false,
+) : SelectFilter(
+    "我的某个收藏夹 → 每个视频一个条目",
+    buildList {
+        add("不使用" to "")
+        when {
+            lists == null && !statusMessage.isNullOrBlank() -> add("（$statusMessage）" to "")
+            lists == null && (listsPending || loggedIn) -> add("（正在加载收藏夹列表，稍等几秒后点「重置」）" to "")
+            lists == null -> add("（需先在 WebView 登录）" to "")
+            lists.isEmpty() -> add("（这个账户还没有收藏夹）" to "")
+            else -> lists.forEach { (name, id) -> add(name to id.toString()) }
+        }
+    },
+)
 
 class FavoriteListFilter : AnimeFilter.Text("收藏夹 / 播放列表 URL 或 ID（填了再输搜索词 = 在该列表内搜索）")
 
@@ -173,7 +179,12 @@ class CategoryFilter :
         ),
     )
 
-fun buildFilterList(myLists: List<Pair<String, Long>>?, loggedIn: Boolean): AnimeFilterList = AnimeFilterList(
+fun buildFilterList(
+    myLists: List<Pair<String, Long>>?,
+    loggedIn: Boolean,
+    myListsMessage: String? = null,
+    listsPending: Boolean = false,
+): AnimeFilterList = AnimeFilterList(
     AnimeFilter.Header("有搜索词时：下面四项作为搜索条件（选了 / 填了收藏夹则改为在该收藏夹内搜索）"),
     SortFilter(),
     DateFilter(),
@@ -182,7 +193,7 @@ fun buildFilterList(myLists: List<Pair<String, Long>>?, loggedIn: Boolean): Anim
     AnimeFilter.Separator(),
     AnimeFilter.Header("无搜索词时：按下面其中一项浏览（从上到下取第一个有值的）"),
     AccountFilter(),
-    MyListVideosFilter(myLists, loggedIn),
+    MyListVideosFilter(myLists, loggedIn, myListsMessage, listsPending),
     FavoriteListFilter(),
     UploaderFilter(),
     BestMonthFilter(),

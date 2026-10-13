@@ -21,6 +21,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
@@ -32,6 +33,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -106,9 +108,16 @@ class XvideosXun :
     // =============================== Search ===============================
 
     override fun getFilterList(): AnimeFilterList {
-        val lists = myLists
-        if (lists == null) fetchMyListsAsync()
-        return buildFilterList(lists, isLoggedIn())
+        refreshLoginCacheFromCookie()
+        // A negative login cache stays until WebView changes the cookie or the user taps 登录.
+        // Other failures (network, API) retry the next time the filter sheet is built.
+        val canTryLists = myLists == null && loginCache != false && sessionCookieHeader() != null
+        if (canTryLists) {
+            myListsMessage = null
+            fetchMyListsAsync()
+        }
+        val pending = canTryLists && myListsMessage == null
+        return buildFilterList(myLists, isLoggedIn(), myListsMessage, pending)
     }
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
@@ -232,7 +241,13 @@ class XvideosXun :
                 response.close()
                 continue
             }
-            val page = runCatching { parseProfileJson(response) }.getOrNull() ?: continue
+            val page = try {
+                parseProfileJson(response)
+            } catch (e: Exception) {
+                // A redesign signal must not be rewritten as "this profile has no public videos".
+                if (e.message?.startsWith("网站可能已改版") == true) throw e
+                continue
+            }
             if (page.animes.isNotEmpty()) {
                 profilePaths[keyword.lowercase()] = profilePath
                 return page
@@ -244,11 +259,17 @@ class XvideosXun :
     private fun parseListingPage(response: Response, document: Document = response.asJsoup()): AnimesPage {
         val url = response.request.url
         val isAccountSection = url.pathSegments.firstOrNull() in ACCOUNT_SECTIONS
-        val page = XvideosXunParser.parseListing(document, baseUrl, isAccountSection)
+        val page = XvideosXunParser.parseListing(
+            document,
+            baseUrl,
+            isAccountSection,
+            listingKind(url, isAccountSection),
+            isFirstListingPage(url),
+        )
 
         if (page.items.isEmpty() && isAccountSection) {
             val sessionGone = document.title().contains("login", ignoreCase = true)
-            if (sessionGone || (document.selectFirst(".empty-state-box") != null && !isLoggedIn())) {
+            if (sessionGone || (document.selectFirst(".empty-state-box") != null && !hasUsableSession())) {
                 throw Exception(LOGIN_HINT)
             }
         }
@@ -286,26 +307,73 @@ class XvideosXun :
 
     @Volatile private var myListsFetching = false
 
+    @Volatile private var myListsMessage: String? = null
+
+    /** null = not checked yet, after the session cookie (a necessary condition) was seen. */
+    @Volatile private var loginCache: Boolean? = null
+
+    @Volatile private var loginCookieSnapshot: String? = null
+
+    private val loginEpoch = AtomicInteger()
+
+    private val loginLock = Any()
+
     private fun fetchMyListsAsync() {
-        if (myListsFetching || !isLoggedIn()) return
+        refreshLoginCacheFromCookie()
+        if (myListsFetching || loginCache == false || sessionCookieHeader() == null) return
         myListsFetching = true
+        val epoch = loginEpoch.get()
         thread(isDaemon = true) {
-            runCatching {
+            try {
                 val result = mutableListOf<Pair<String, Long>>()
                 var page = 0
                 while (page < MAX_ALPHA_PAGES) {
                     val response = client.newCall(POST("$baseUrl$PLAYLISTS_API/alpha/$page", ajaxHeaders)).execute()
-                    val dto = parsePlaylistEnvelope<PlaylistsAlphaDto>(response)
+                    val dto = parsePlaylistEnvelope<PlaylistsAlphaDto>(response, epoch)
                     val lists = dto.data?.lists.orEmpty()
                     result += lists.map { "${it.name}（${it.nbVideos}）" to it.id }
                     val meta = dto.metadata
                     if (lists.isEmpty() || meta == null || (meta.page + 1) * meta.nbPerPage >= meta.nbLists) break
                     page++
                 }
-                myLists = result
+                synchronized(loginLock) {
+                    if (epoch != loginEpoch.get()) return@thread
+                    myLists = result
+                    myListsMessage = null
+                }
+            } catch (e: Exception) {
+                if (e is LoginRecheckCancelled) return@thread
+                synchronized(loginLock) {
+                    if (epoch != loginEpoch.get()) return@thread
+                    myLists = null
+                    myListsMessage = if (loginCache == false || e.message == LOGIN_HINT) {
+                        "未登录"
+                    } else {
+                        e.message?.takeIf { it.isNotBlank() } ?: "加载收藏夹失败"
+                    }
+                }
+            } finally {
+                synchronized(loginLock) {
+                    if (epoch == loginEpoch.get()) myListsFetching = false
+                }
             }
-            myListsFetching = false
         }
+    }
+
+    private fun listingKind(url: HttpUrl, isAccountSection: Boolean): ListingKind {
+        if (isAccountSection) return ListingKind.OPTIONAL
+        if (!url.queryParameter("k").isNullOrBlank()) return ListingKind.OPTIONAL
+        val first = url.pathSegments.firstOrNull().orEmpty()
+        if (first == "favorite" || first == "playlist") return ListingKind.OPTIONAL
+        return ListingKind.CURATED
+    }
+
+    /** App page 1. Latest page 1 is `/`; later latest pages are `/new/{n}` and are allowed to be empty. */
+    private fun isFirstListingPage(url: HttpUrl): Boolean {
+        val segments = url.pathSegments.filter { it.isNotBlank() }
+        if (segments.isEmpty()) return true
+        if (segments.first() == "new") return false
+        return segments.last() == "0"
     }
 
     /**
@@ -528,6 +596,13 @@ class XvideosXun :
             videos.add(Video(low, "MP4 Low", low, headers = headers))
         }
 
+        if (hls.isNullOrBlank() && high.isNullOrBlank() && low.isNullOrBlank()) {
+            val fallback = XvideosXunParser.mediaContentUrl(XvideosXunParser.extractJsonLd(html))
+            if (!fallback.isNullOrBlank()) {
+                videos.add(Video(fallback, "MP4", fallback, headers = headers))
+            }
+        }
+
         if (videos.isEmpty()) throw Exception("未找到视频地址")
         return videos
     }
@@ -571,6 +646,23 @@ class XvideosXun :
             summary = "默认使用上个月的 Best of（与网站默认一致）；开启后改为当月"
             setDefaultValue(false)
         }.also(screen::addPreference)
+
+        // The extensions stub only exposes Preference() with no Context, which the real
+        // AndroidX class does not have. A switch that never stays on is the click target.
+        SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_LOGIN_RECHECK
+            title = "登录"
+            summary = "在 WebView 登录 XVideos 后点这里，再回浏览页点「重置」刷新收藏夹"
+            setDefaultValue(false)
+            setOnPreferenceClickListener {
+                clearLoginCache()
+                true
+            }
+            setOnPreferenceChangeListener { _, _ ->
+                clearLoginCache()
+                false
+            }
+        }.also(screen::addPreference)
     }
 
     // ============================== Helpers ===============================
@@ -596,12 +688,28 @@ class XvideosXun :
     /** Numeric list id from a /favorite/{id}/{slug} (or /playlist/…) url, or null for anything else. */
     private fun favoriteListId(url: String): Long? = FAVORITE_PATH_REGEX.find(url)?.groupValues?.get(2)?.toLongOrNull()
 
-    private inline fun <reified T : PlaylistEnvelope> parsePlaylistEnvelope(response: Response): T {
+    private inline fun <reified T : PlaylistEnvelope> parsePlaylistEnvelope(
+        response: Response,
+        epoch: Int? = null,
+    ): T {
         val dto = json.decodeFromString<T>(response.body.string())
+        val recorded = synchronized(loginLock) {
+            if (epoch != null && epoch != loginEpoch.get()) return@synchronized false
+            when (dto.metadata?.isLogged) {
+                false -> noteLoggedOut()
+                true -> noteLoggedIn()
+                null -> Unit
+            }
+            true
+        }
+        if (!recorded) throw LoginRecheckCancelled()
         if (dto.metadata?.isLogged == false) throw Exception(LOGIN_HINT)
         if (!dto.result) throw Exception(dto.message ?: "XVideos 返回错误")
         return dto
     }
+
+    /** Background favorites fetch was dropped because the user asked for a fresh login check. */
+    private class LoginRecheckCancelled : Exception()
 
     /** POST /api/playlists/alpha/{page}: one entry per list, alphabetically sorted. */
     private fun parsePlaylistsJson(response: Response): AnimesPage {
@@ -675,13 +783,68 @@ class XvideosXun :
         }
     }
 
+    /**
+     * `session_token` is set for anonymous visits too, so the cookie is only a prerequisite.
+     * [loginCache] is filled from `metadata.isLogged` on the playlists API. A changed cookie
+     * header means WebView login replaced the anonymous session and the negative cache is stale.
+     */
+    private fun sessionCookieHeader(): String? {
+        val raw = runCatching { CookieManager.getInstance().getCookie(baseUrl) }.getOrNull() ?: return null
+        val hasSession = raw.split(';').any { part ->
+            part.trim().substringBefore('=').trim() == "session_token"
+        }
+        return raw.takeIf { hasSession }
+    }
+
+    private fun refreshLoginCacheFromCookie() {
+        val cookies = sessionCookieHeader()
+        if (cookies == null) {
+            if (loginCache != null || myLists != null || myListsMessage != null) {
+                clearLoginCache()
+            }
+            return
+        }
+        val snapshot = loginCookieSnapshot
+        if (snapshot != null && cookies != snapshot) {
+            clearLoginCache()
+        }
+    }
+
     private fun isLoggedIn(): Boolean {
-        val cookies = runCatching { CookieManager.getInstance().getCookie(baseUrl) }.getOrNull() ?: return false
-        return cookies.contains("session_token")
+        refreshLoginCacheFromCookie()
+        return sessionCookieHeader() != null && loginCache == true
+    }
+
+    /** Cookie present and the playlists API has not said this session is anonymous. */
+    private fun hasUsableSession(): Boolean {
+        refreshLoginCacheFromCookie()
+        return sessionCookieHeader() != null && loginCache != false
     }
 
     private fun requireLogin() {
-        if (!isLoggedIn()) throw Exception(LOGIN_HINT)
+        if (!hasUsableSession()) throw Exception(LOGIN_HINT)
+    }
+
+    private fun noteLoggedIn() {
+        loginCache = true
+        loginCookieSnapshot = sessionCookieHeader()
+    }
+
+    private fun noteLoggedOut() {
+        loginCache = false
+        loginCookieSnapshot = sessionCookieHeader()
+        myLists = null
+    }
+
+    private fun clearLoginCache() {
+        synchronized(loginLock) {
+            loginEpoch.incrementAndGet()
+            loginCache = null
+            loginCookieSnapshot = null
+            myLists = null
+            myListsMessage = null
+            myListsFetching = false
+        }
     }
 
     /**
@@ -825,5 +988,6 @@ class XvideosXun :
 
         private const val PREF_PREFER_HLS = "prefer_hls"
         private const val PREF_BEST_CURRENT_MONTH = "best_current_month"
+        private const val PREF_LOGIN_RECHECK = "login_recheck"
     }
 }

@@ -2,12 +2,26 @@ package eu.kanade.tachiyomi.animeextension.all.xvideosxun
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
 import java.net.URI
 import java.net.URISyntaxException
+
+/**
+ * [CURATED] listings (popular, latest, category, tag) must have tiles on page 1.
+ * [OPTIONAL] listings (search, favorites, account) may be empty.
+ */
+internal enum class ListingKind {
+    CURATED,
+    OPTIONAL,
+}
 
 /**
  * Which field supplied a listing title. [PRIMARY] is the anchor `title` used by home / newest /
@@ -71,6 +85,7 @@ internal data class VideoJsonLd(
     val thumbnailUrl: List<String>? = null,
     val uploadDate: String? = null,
     val duration: String? = null,
+    val contentUrl: JsonElement? = null,
 )
 
 /** One object from the `video_related=[…]` script array. */
@@ -91,6 +106,9 @@ internal data class RelatedVideo(
 internal object XvideosXunParser {
     const val LISTING_SELECTOR = "div.mozaique div.thumb-block, div#content div.thumb-block"
     const val NEXT_PAGE_SELECTOR = "a.next-page, .pagination a.next, .pagination li.next a"
+    const val REDESIGN_TITLE_MESSAGE = "网站可能已改版，请更新 XvXun 插件（标题标记不匹配）"
+    const val REDESIGN_EMPTY_MESSAGE = "网站可能已改版，请更新 XvXun 插件（没有找到视频列表）"
+    const val REDESIGN_RELATED_MESSAGE = "网站可能已改版，请更新 XvXun 插件（相关视频数据不匹配）"
 
     private const val BEST_NEXT_PAGE_SELECTOR = ".pagination a.current + a[href]"
     private const val AUTHOR_SELECTOR = "p.metadata span.name, .video-metadata a.name, .video-metadata span.name"
@@ -110,10 +128,12 @@ internal object XvideosXunParser {
     private const val LIKES = "span.rating-good-perc, span.rating-good-nbr"
     private const val DISLIKES = "span.rating-bad-perc, span.rating-bad-nbr"
     private const val JSON_LD = "script[type=application/ld+json]"
+    private const val RELATED_MARKER = "video_related="
 
     private val playerHlsRegex = Regex("""html5player\.setVideoHLS\('([^']+)'\)""")
     private val playerHighRegex = Regex("""html5player\.setVideoUrlHigh\('([^']+)'\)""")
     private val playerLowRegex = Regex("""html5player\.setVideoUrlLow\('([^']+)'\)""")
+    private val mediaExtRegex = Regex("""\.(m3u8|mp4|webm|m4v|mkv|mov|ts)(?:$|[?#])""", RegexOption.IGNORE_CASE)
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -121,11 +141,25 @@ internal object XvideosXunParser {
         coerceInputValues = true
     }
 
-    fun parseListing(document: Document, baseUrl: String, accountSection: Boolean): ListingPage {
+    fun parseListing(
+        document: Document,
+        baseUrl: String,
+        accountSection: Boolean,
+        kind: ListingKind = ListingKind.OPTIONAL,
+        firstPage: Boolean = false,
+    ): ListingPage {
         val items = document.select(LISTING_SELECTOR)
             .filter { it.isVideoBlock() }
             .map { parseListingItem(it, baseUrl) }
         val primaryTitleHits = items.count { it.titleSource == TitleSource.PRIMARY || it.titleSource == TitleSource.BLOCK_TITLE }
+        // Slug / alt / anchor-text fallbacks still fill a title, so a non-empty title is not evidence
+        // the selectors still match. Below half of the tiles using the main selector means the markup moved.
+        if (items.isNotEmpty() && primaryTitleHits * 2 < items.size) {
+            throw Exception(REDESIGN_TITLE_MESSAGE)
+        }
+        if (items.isEmpty() && kind == ListingKind.CURATED && firstPage && !isBlockedPage(document)) {
+            throw Exception(REDESIGN_EMPTY_MESSAGE)
+        }
         val hasNext = document.selectFirst(NEXT_PAGE_SELECTOR) != null ||
             document.selectFirst(BEST_NEXT_PAGE_SELECTOR) != null ||
             // Account fragments carry no pagination markup; assume more while pages are full.
@@ -206,6 +240,8 @@ internal object XvideosXunParser {
         return raw.trim().takeIf { it.isNotBlank() }
     }
 
+    fun extractJsonLd(html: String): VideoJsonLd? = extractJsonLd(Jsoup.parse(html))
+
     fun extractJsonLd(document: Document): VideoJsonLd? {
         for (script in document.select(JSON_LD)) {
             val text = script.data().trim()
@@ -221,14 +257,28 @@ internal object XvideosXunParser {
         low = playerLowRegex.find(html)?.groupValues?.get(1),
     )
 
+    /** http(s) contentUrl that looks like a media file. Page URLs are ignored. */
+    fun mediaContentUrl(ld: VideoJsonLd?): String? {
+        val raw = ld?.contentUrl.asHttpString() ?: return null
+        if (!raw.startsWith("http://") && !raw.startsWith("https://")) return null
+        if (!mediaExtRegex.containsMatchIn(raw)) return null
+        return raw
+    }
+
+    fun relatedMarkerPresent(html: String): Boolean = html.contains(RELATED_MARKER)
+
     /**
-     * The JSON array that follows `video_related=` in a script, or null when the marker is absent
-     * or the brackets do not close. Decode failures are an empty list so a broken recommendation
-     * block does not hide the video the user opened.
+     * Videos from `video_related=`. A missing marker is an empty list (the page may simply have
+     * no recommendations). A marker that is not a JSON array means the script shape changed.
      */
     fun parseRelatedVideos(html: String): List<RelatedVideo> {
-        val array = extractJsArray(html, "video_related=") ?: return emptyList()
-        return runCatching { json.decodeFromString<List<RelatedVideo>>(array) }.getOrDefault(emptyList())
+        if (!relatedMarkerPresent(html)) return emptyList()
+        val array = extractJsArray(html, RELATED_MARKER) ?: throw Exception(REDESIGN_RELATED_MESSAGE)
+        return try {
+            json.decodeFromString<List<RelatedVideo>>(array)
+        } catch (_: Exception) {
+            throw Exception(REDESIGN_RELATED_MESSAGE)
+        }
     }
 
     /** The JSON array that follows [marker] in a script, found by bracket matching (titles may contain `]`). */
@@ -304,6 +354,20 @@ internal object XvideosXunParser {
         if (text.isNotBlank()) return text to source
         val slug = titleFromSlug(href)
         return slug to TitleSource.SLUG
+    }
+
+    /** Login walls and bot challenges are not evidence the listing markup changed. */
+    private fun isBlockedPage(document: Document): Boolean {
+        val title = document.title()
+        return title.contains("login", ignoreCase = true) ||
+            title.contains("challenge", ignoreCase = true) ||
+            title.contains("Just a moment", ignoreCase = true)
+    }
+
+    private fun JsonElement?.asHttpString(): String? = when (this) {
+        is JsonPrimitive -> contentOrNull?.takeIf { isString }
+        is JsonArray -> firstOrNull().asHttpString()
+        else -> null
     }
 
     /** Only keep tiles that point at a video (home page also carries channel/ad tiles). */
