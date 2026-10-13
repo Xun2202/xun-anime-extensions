@@ -1,8 +1,8 @@
 name: Canary (live site checks)
 
-# Runs on GitHub-hosted runners only. It fetches a few public pages of the sites that XvXun / RouXun
-# scrape, feeds them through the extensions' own parsers (the *LiveCanaryTest classes) and opens an
-# issue when the structure no longer matches. Nothing here runs on users' phones.
+# Runs on GitHub-hosted runners only. It fetches a few public pages of the sites that XvXun / RouXun /
+# Rule34Video Xun scrape, feeds them through the extensions' own parsers (the *LiveCanaryTest classes)
+# and opens an issue when the structure no longer matches. Nothing here runs on users' phones.
 
 on:
   schedule:
@@ -49,6 +49,7 @@ jobs:
           ./gradlew \
             :src:all:xvideosxun:testDebugUnitTest \
             :src:all:rouxun:testDebugUnitTest \
+            :src:en:rule34videoxun:testDebugUnitTest \
             --tests '*LiveCanary*' --continue --no-configuration-cache
 
       - name: Summarize JUnit results
@@ -59,7 +60,7 @@ jobs:
           import glob, os, xml.etree.ElementTree as ET
           total = failed = skipped = 0
           failures = []
-          for path in glob.glob('src/all/*/build/test-results/testDebugUnitTest/*LiveCanary*.xml'):
+          for path in glob.glob('src/*/*/build/test-results/testDebugUnitTest/*LiveCanary*.xml'):
               suite = ET.parse(path).getroot()
               for case in suite.iter('testcase'):
                   total += 1
@@ -94,7 +95,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: canary-test-reports
-          path: src/all/*/build/reports/tests/testDebugUnitTest
+          path: src/*/*/build/reports/tests/testDebugUnitTest
           if-no-files-found: ignore
           retention-days: 14
 

@@ -13,10 +13,12 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
 
-                <data
-                    android:host="rule34video.com"
-                    android:pathPattern="/videos/..*"
-                    android:scheme="https" />
+                <data android:scheme="https" />
+                <data android:host="rule34video.com" />
+                <data android:host="www.rule34video.com" />
+                <data android:pathPattern="/video/..*" />
+                <data android:pathPattern="/videos/..*" />
+                <data android:pathPattern="/models/..*" />
             </intent-filter>
         </activity>
     </application>
