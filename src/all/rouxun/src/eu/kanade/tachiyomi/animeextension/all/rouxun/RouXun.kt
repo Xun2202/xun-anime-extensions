@@ -476,7 +476,7 @@ class RouXun :
         val upstream = if (hlsPath.startsWith("http")) hlsPath else baseUrl + hlsPath
         // Fail here, before the player, so a dead playlist is this message rather than mpv's
         // generic "loading failed".
-        proxy.assertPlayable(upstream)
+        withContext(Dispatchers.IO) { proxy.assertPlayable(upstream) }
         val resolution = detail.video.maxResolution
         val quality = resolution?.let { "${it}p" } ?: "HLS"
         val url = proxy.playlistUrl(id, upstream)
