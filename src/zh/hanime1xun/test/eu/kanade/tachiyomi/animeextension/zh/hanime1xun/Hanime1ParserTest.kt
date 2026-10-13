@@ -231,7 +231,7 @@ class Hanime1ParserTest {
     }
 
     private fun fixture(name: String): Document {
-        val stream = javaClass.classLoader.getResourceAsStream(name)
+        val stream = javaClass.classLoader?.getResourceAsStream(name)
             ?: error("missing fixture $name")
         return Jsoup.parse(stream.bufferedReader(Charsets.UTF_8).readText(), BASE)
     }
@@ -250,7 +250,7 @@ class Hanime1ParserTest {
     private fun nextLink() = """<li class="page-item"><a class="page-link" rel="next" href="?page=2">›</a></li>"""
 
     private fun uploadTime(day: String): Long {
-        return SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).parse(day).time
+        return checkNotNull(SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).parse(day)).time
     }
 
     /** Copy of Anikku AnimeHttpSource.generateId, including operator precedence. */

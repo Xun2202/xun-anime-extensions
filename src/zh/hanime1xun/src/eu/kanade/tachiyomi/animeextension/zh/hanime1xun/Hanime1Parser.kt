@@ -152,9 +152,7 @@ internal fun isAuthorCollection(url: String): Boolean {
     return httpUrl.encodedPath == "/search" && !httpUrl.queryParameter("query").isNullOrBlank()
 }
 
-internal fun authorQuery(url: String): String? {
-    return toHanimeUrl(url)?.queryParameter("query")?.takeIf { it.isNotBlank() }
-}
+internal fun authorQuery(url: String): String? = toHanimeUrl(url)?.queryParameter("query")?.takeIf { it.isNotBlank() }
 
 internal fun authorCollectionUrl(name: String): String {
     val built = "https://hanime1.me".toHttpUrl().newBuilder()
@@ -358,9 +356,7 @@ private fun Document.playlistEpisodes(pageUrl: String): List<ParsedEpisode> {
     }
 }
 
-private fun Document.uploadDateMillis(): Long {
-    return parseUploadDate(select("#shareBtn-title + div").text())
-}
+private fun Document.uploadDateMillis(): Long = parseUploadDate(select("#shareBtn-title + div").text())
 
 private fun toHanimeUrl(url: String): HttpUrl? {
     val absolute = when {

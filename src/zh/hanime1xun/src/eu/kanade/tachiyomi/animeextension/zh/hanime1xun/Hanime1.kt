@@ -167,13 +167,9 @@ class Hanime1 :
      */
     private fun String.appendInvisibleChar(): String = "${this}\u200B"
 
-    override fun searchAnimeParse(response: Response): AnimesPage {
-        return response.useAsJsoup().parseListing().toAnimesPage()
-    }
+    override fun searchAnimeParse(response: Response): AnimesPage = response.useAsJsoup().parseListing().toAnimesPage()
 
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        return GET(hanime1SearchUrl(baseUrl, page, query, filters))
-    }
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request = GET(hanime1SearchUrl(baseUrl, page, query, filters))
 
     private fun checkFiltersInterceptor(chain: Interceptor.Chain): Response {
         if (filterUpdateState == FilterUpdateState.NONE) {
