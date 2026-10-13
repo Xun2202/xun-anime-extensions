@@ -20,8 +20,24 @@ class GenreFilter(values: Array<String>) :
     QueryFilter(
         "影片類型",
         "genre",
-        values.ifEmpty { arrayOf("全部", "裏番", "泡面番", "Motion Anime") },
+        values.ifEmpty {
+            arrayOf(
+                "全部",
+                "裏番",
+                "泡麵番",
+                "Motion Anime",
+                "3DCG",
+                "2.5D",
+                "2D動畫",
+                "AI生成",
+                "MMD",
+                "Cosplay",
+                "新番預告",
+            )
+        },
     )
+
+class ArtistSearchFilter : AnimeFilter.CheckBox("搜尋作者", false)
 
 class SortFilter(values: Array<String>) :
     QueryFilter(

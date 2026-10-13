@@ -19,7 +19,6 @@ import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
-import keiyoushi.utils.tryParse
 import keiyoushi.utils.useAsJsoup
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -32,8 +31,6 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
-import java.text.SimpleDateFormat
-import java.util.Locale
 
 enum class FilterUpdateState {
     NONE,
@@ -46,8 +43,10 @@ class Hanime1 :
     AnimeHttpLegacySource(),
     ConfigurableAnimeSource {
     override val baseUrl = "https://hanime1.me"
-    override val lang = "zh"
-    override val name = "Hanime1.me"
+
+    // name / lang / versionId stay on the original values so the generated source id matches Hanime1 v7.
+    override val lang = Hanime1SourceId.LANG
+    override val name = Hanime1SourceId.NAME
     override val supportsLatest: Boolean
         get() = true
 
@@ -58,12 +57,42 @@ class Hanime1 :
     private val preferences by getPreferencesLazy()
 
     private var filterUpdateState = FilterUpdateState.NONE
-    private val uploadDateFormat: SimpleDateFormat by lazy {
-        SimpleDateFormat("yyyy-MM-dd", Locale.ROOT)
+
+    override suspend fun getAnimeDetails(anime: SAnime): SAnime {
+        if (!isAuthorCollection(anime.url)) {
+            return super.getAnimeDetails(anime)
+        }
+        val name = authorQuery(anime.url).orEmpty()
+        val episodes = loadAuthorEpisodes(anime.url)
+        return SAnime.create().apply {
+            url = anime.url
+            title = anime.title.ifBlank { name.hanime1ListingTitle() }
+            author = name
+            thumbnail_url = anime.thumbnail_url
+            description = authorCollectionDescription(episodes.size)
+            initialized = true
+        }
+    }
+
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        if (!isAuthorCollection(anime.url)) {
+            return super.getEpisodeList(anime)
+        }
+        return loadAuthorEpisodes(anime.url).map { it.toSEpisode() }
     }
 
     override fun animeDetailsParse(response: Response): SAnime {
+        val requestUrl = response.request.url.toString()
         val doc = response.useAsJsoup()
+        if (isAuthorCollection(requestUrl)) {
+            val details = doc.parseAuthorCollectionDetails(requestUrl)
+            return SAnime.create().apply {
+                setUrlWithoutDomain(requestUrl)
+                title = details.name.hanime1ListingTitle()
+                author = details.name
+                description = details.description
+            }
+        }
         return SAnime.create().apply {
             genre = doc.select(".single-video-tag").not("[data-toggle]").eachText()
                 // Convert `# 博麗靈夢`, `1080p (1)` to `博麗靈夢`, `1080p`
@@ -96,20 +125,14 @@ class Hanime1 :
     }
 
     override fun episodeListParse(response: Response): List<SEpisode> {
-        val jsoup = response.useAsJsoup()
-        val nodes = jsoup.select("#playlist-scroll").first()!!.select(">div")
-        return nodes.mapIndexed { index, element ->
-            SEpisode.create().apply {
-                val href = element.select(".thumb-container a").attr("href")
-                setUrlWithoutDomain(href)
-                episode_number = (nodes.size - index).toFloat()
-                name = element.select(".video-title").text()
-                if (response.request.url.resolve(href) == response.request.url) {
-                    // current video, parse `觀看次數：362.5萬次 2025-12-26` to upload date
-                    date_upload = uploadDateFormat.tryParse(REGEX_UPLOAD_DATE.find(jsoup.select("#shareBtn-title + div").text())?.value)
-                }
-            }
+        val requestUrl = response.request.url.toString()
+        val document = response.useAsJsoup()
+        val parsed = if (isAuthorCollection(requestUrl)) {
+            episodesFromListingPages(listOf(document.parseListing()))
+        } else {
+            document.parseWatchEpisodes(requestUrl)
         }
+        return parsed.map { it.toSEpisode() }
     }
 
     override fun videoListParse(response: Response): List<Video> {
@@ -145,88 +168,11 @@ class Hanime1 :
     private fun String.appendInvisibleChar(): String = "${this}\u200B"
 
     override fun searchAnimeParse(response: Response): AnimesPage {
-        val jsoup = response.useAsJsoup()
-        val nodes = jsoup.select(".horizontal-row .video-item-container:not(:has(a.video-link[target]))")
-        val list = if (nodes.isNotEmpty()) {
-            nodes.map {
-                SAnime.create().apply {
-                    setUrlWithoutDomain(it.select("a.video-link").attr("href"))
-                    thumbnail_url = it.select(".main-thumb").attr("abs:src")
-                    title = it.select(".title").text().appendInvisibleChar()
-                    author = it.select(".subtitle").text().split("•").getOrNull(0)?.trim()
-                }
-            }
-        } else {
-            jsoup.select("a:not([target]) > .search-videos").map {
-                SAnime.create().apply {
-                    setUrlWithoutDomain(it.parent()!!.attr("href"))
-                    thumbnail_url = it.select("img").attr("src")
-                    title = it.select(".home-rows-videos-title").text().appendInvisibleChar()
-                }
-            }
-        }
-        val nextPage = jsoup.select("li.page-item a.page-link[rel=next]")
-        return AnimesPage(list, nextPage.isNotEmpty())
+        return response.useAsJsoup().parseListing().toAnimesPage()
     }
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        val searchUrl = baseUrl.toHttpUrl().newBuilder().addPathSegment("search")
-        if (query.isNotEmpty()) {
-            searchUrl.addQueryParameter("query", query)
-        }
-        val timeFilters = mutableListOf<TimeFilter>()
-        filters.list.flatMap {
-            when (it) {
-                is TagsFilter -> {
-                    it.state.flatMap { inner ->
-                        if (inner is CategoryFilter) {
-                            inner.state
-                        } else {
-                            listOf(inner)
-                        }
-                    }
-                }
-
-                is AnimeFilter.Group<*> -> it.state
-                else -> listOf(it)
-            }
-        }.forEach {
-            when (it) {
-                is QueryFilter -> {
-                    if (it.selected.isNotEmpty()) {
-                        searchUrl.addQueryParameter(it.key, it.selected)
-                    }
-                }
-
-                is BroadMatchFilter -> {
-                    if (it.state) {
-                        searchUrl.addQueryParameter(it.key, "on")
-                    }
-                }
-
-                is TagFilter -> {
-                    if (it.state) {
-                        searchUrl.addQueryParameter(it.key, it.name)
-                    }
-                }
-
-                is TimeFilter -> {
-                    timeFilters.add(it)
-                }
-
-                else -> {}
-            }
-        }
-        if (timeFilters.isNotEmpty()) {
-            timeFilters.sort()
-            timeFilters.joinToString(separator = "") { it.selected }.let {
-                searchUrl.addEncodedQueryParameter("date", it)
-            }
-        }
-        if (page > 1) {
-            searchUrl.addQueryParameter("page", "$page")
-        }
-        return GET(searchUrl.build())
+        return GET(hanime1SearchUrl(baseUrl, page, query, filters))
     }
 
     private fun checkFiltersInterceptor(chain: Interceptor.Chain): Response {
@@ -301,6 +247,7 @@ class Hanime1 :
     }
 
     override fun getFilterList(): AnimeFilterList = AnimeFilterList(
+        ArtistSearchFilter(),
         createFilter(PREF_KEY_GENRE_LIST) { GenreFilter(it) },
         createFilter(PREF_KEY_SORT_LIST) { SortFilter(it) },
         DateFilter(
@@ -364,7 +311,38 @@ class Hanime1 :
 
         const val DEFAULT_QUALITY = "1080P"
 
-        private val REGEX_UPLOAD_DATE = Regex("""\d{4}-\d{2}-\d{2}""")
         private val REGEX_VIDEO_TAG_SUFFIX = Regex(""" \(\d+\)$""")
+    }
+
+    private suspend fun loadAuthorEpisodes(animeUrl: String): List<ParsedEpisode> {
+        val query = authorQuery(animeUrl) ?: return emptyList()
+        return authorEpisodesFrom { page ->
+            client.newCall(searchAnimeRequest(page, query, AnimeFilterList()))
+                .awaitSuccess()
+                .useAsJsoup()
+        }
+    }
+
+    private fun ListingPage.toAnimesPage(): AnimesPage {
+        val animes = items.map { item ->
+            SAnime.create().apply {
+                setUrlWithoutDomain("$baseUrl${item.url}")
+                title = item.title
+                thumbnail_url = item.thumbnail
+                author = item.author
+                description = item.description
+            }
+        }
+        return AnimesPage(animes, hasNextPage)
+    }
+
+    private fun ParsedEpisode.toSEpisode(): SEpisode {
+        val parsed = this
+        return SEpisode.create().apply {
+            setUrlWithoutDomain("$baseUrl${parsed.url}")
+            name = parsed.name
+            episode_number = parsed.episodeNumber
+            date_upload = parsed.dateUpload
+        }
     }
 }
