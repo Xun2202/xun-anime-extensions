@@ -1,0 +1,157 @@
+name: Canary (live site checks)
+
+# Runs on GitHub-hosted runners only. It fetches a few public pages of the sites that XvXun / RouXun
+# scrape, feeds them through the extensions' own parsers (the *LiveCanaryTest classes) and opens an
+# issue when the structure no longer matches. Nothing here runs on users' phones.
+
+on:
+  schedule:
+    - cron: '17 2 * * *' # daily, 10:17 Beijing time
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: Parse live pages with the extension parsers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      outcome: ${{ steps.summary.outputs.outcome }}
+      summary: ${{ steps.summary.outputs.summary }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run live canary tests
+        id: tests
+        continue-on-error: true
+        env:
+          CANARY_LIVE: '1'
+        run: |
+          ./gradlew \
+            :src:all:xvideosxun:testDebugUnitTest \
+            :src:all:rouxun:testDebugUnitTest \
+            --tests '*LiveCanary*' --continue --no-configuration-cache
+
+      - name: Summarize JUnit results
+        id: summary
+        if: always()
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import glob, os, xml.etree.ElementTree as ET
+          total = failed = skipped = 0
+          failures = []
+          for path in glob.glob('src/all/*/build/test-results/testDebugUnitTest/*LiveCanary*.xml'):
+              suite = ET.parse(path).getroot()
+              for case in suite.iter('testcase'):
+                  total += 1
+                  if case.find('skipped') is not None:
+                      skipped += 1
+                  elif case.find('failure') is not None or case.find('error') is not None:
+                      failed += 1
+                      node = case.find('failure') if case.find('failure') is not None else case.find('error')
+                      msg = (node.get('message') or '').splitlines()[0][:200] if node is not None else ''
+                      failures.append(f"- `{case.get('classname').rsplit('.', 1)[-1]}.{case.get('name')}`: {msg}")
+          gradle_failed = os.environ.get('TESTS_OUTCOME') == 'failure'
+          if failed or gradle_failed:
+              outcome = 'failure'
+          elif total and skipped == total:
+              outcome = 'skipped'
+          else:
+              outcome = 'success'
+          summary = f"{total} checks, {failed} failed, {skipped} skipped (site unreachable / challenge page)"
+          if gradle_failed and not failed:
+              summary += '; Gradle itself failed (compile error or no test matched), see the run log'
+          print(f"outcome={outcome}")
+          print("summary<<EOS")
+          print(summary)
+          print('\n'.join(failures))
+          print("EOS")
+          EOF
+        env:
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-test-reports
+          path: src/all/*/build/reports/tests/testDebugUnitTest
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Fail the job when the parsers no longer match
+        if: steps.summary.outputs.outcome == 'failure'
+        run: |
+          echo "::error::${{ steps.summary.outputs.summary }}"
+          exit 1
+
+  report:
+    name: Open / close the tracking issue
+    needs: canary
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update tracking issue
+        uses: actions/github-script@v7
+        env:
+          OUTCOME: ${{ needs.canary.outputs.outcome }}
+          SUMMARY: ${{ needs.canary.outputs.summary }}
+        with:
+          script: |
+            const title = '[canary] XvXun / RouXun 解析器与站点当前结构不匹配';
+            const label = 'canary';
+            const outcome = process.env.OUTCOME;
+            const summary = process.env.SUMMARY || '';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const { data: open } = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', labels: label, per_page: 10,
+            });
+            const existing = open.find((i) => i.title === title);
+
+            if (outcome === 'failure') {
+              // Only alert after two consecutive scheduled failures, so a one-off site hiccup does not page.
+              const { data: runs } = await github.rest.actions.listWorkflowRuns({
+                ...context.repo, workflow_id: 'canary.yml', event: 'schedule', status: 'completed', per_page: 2,
+              });
+              const previous = runs.workflow_runs.find((r) => r.id !== context.runId);
+              const previousFailed = previous && previous.conclusion === 'failure';
+              const body = `金丝雀检查失败（${summary.split('\n')[0]}）。\n\n${summary.split('\n').slice(1).join('\n')}\n\n运行记录：${runUrl}\n\n请对照失败的用例更新对应扩展的选择器 / serverFn 发现规则，发新版本后本 issue 会在下一次检查通过时自动关闭。`;
+              if (existing) {
+                await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body });
+              } else if (previousFailed) {
+                try {
+                  await github.rest.issues.createLabel({ ...context.repo, name: label, color: 'e4a11b', description: 'Opened by the canary workflow' });
+                } catch (e) { /* label already exists */ }
+                await github.rest.issues.create({ ...context.repo, title, labels: [label], body });
+              } else {
+                core.notice('First failure; waiting for a second consecutive failure before opening an issue.');
+              }
+            } else if (outcome === 'success' && existing) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: existing.number,
+                body: `金丝雀检查已恢复通过（${summary.split('\n')[0]}）。运行记录：${runUrl}`,
+              });
+              await github.rest.issues.update({ ...context.repo, issue_number: existing.number, state: 'closed' });
+            } else {
+              core.notice(`Outcome: ${outcome}; ${summary.split('\n')[0]}`);
+            }
