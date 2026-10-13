@@ -435,14 +435,16 @@ class RouXun :
     override suspend fun fetchRelatedAnimeList(anime: SAnime): List<SAnime> = executeFn(relatedAnimeListRequest(anime)).let { relatedAnimeListParse(it) }
 
     override fun relatedAnimeListParse(response: Response): List<SAnime> {
-        if (response.fnKey() == FnKey.SERIES_DETAIL) {
-            return response.fnResult<SeriesDetailResult>().more.map { it.toSAnime() }
+        val entries = if (response.fnKey() == FnKey.SERIES_DETAIL) {
+            response.fnResult<SeriesDetailResult>().relatedEntries()
+        } else {
+            response.fnResult<VideoDetailResult>().relatedEntries()
         }
-        val detail = response.fnResult<VideoDetailResult>()
-        return buildList {
-            detail.series?.let { add(it.toSAnime()) }
-            detail.moreSeries.forEach { add(it.toSAnime()) }
-            detail.relatedVideos.forEach { add(it.toSAnime()) }
+        return entries.map { entry ->
+            when (entry) {
+                is RelatedEntry.Series -> entry.series.toSAnime()
+                is RelatedEntry.Video -> entry.video.toSAnime()
+            }
         }.distinctBy { it.url }
     }
 

@@ -99,6 +99,24 @@ internal data class SeriesDetailResult(
     val more: List<SeriesDto> = emptyList(),
 )
 
+internal sealed interface RelatedEntry {
+    data class Video(val video: VideoDto) : RelatedEntry
+    data class Series(val series: SeriesDto) : RelatedEntry
+}
+
+/**
+ * [VideoDetailResult.moreSeries] is the site's「猜你想追」rail: the same AI-series list on every
+ * video, so it is not related to the open title. [relatedVideos] is「相關視頻」. [series] is the
+ * show this video belongs to.
+ */
+internal fun VideoDetailResult.relatedEntries(): List<RelatedEntry> = buildList {
+    series?.let { add(RelatedEntry.Series(it)) }
+    relatedVideos.forEach { add(RelatedEntry.Video(it)) }
+}
+
+/** [SeriesDetailResult.more] is that same rail with the open series removed. */
+internal fun SeriesDetailResult.relatedEntries(): List<RelatedEntry> = emptyList()
+
 @Serializable
 internal data class HomeResult(
     val latestVideos: List<VideoDto> = emptyList(),
