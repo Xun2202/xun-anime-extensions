@@ -646,23 +646,6 @@ class XvideosXun :
             summary = "默认使用上个月的 Best of（与网站默认一致）；开启后改为当月"
             setDefaultValue(false)
         }.also(screen::addPreference)
-
-        // The extensions stub only exposes Preference() with no Context, which the real
-        // AndroidX class does not have. A switch that never stays on is the click target.
-        SwitchPreferenceCompat(screen.context).apply {
-            key = PREF_LOGIN_RECHECK
-            title = "登录"
-            summary = "在 WebView 登录 XVideos 后点这里，再回浏览页点「重置」刷新收藏夹"
-            setDefaultValue(false)
-            setOnPreferenceClickListener {
-                clearLoginCache()
-                true
-            }
-            setOnPreferenceChangeListener { _, _ ->
-                clearLoginCache()
-                false
-            }
-        }.also(screen::addPreference)
     }
 
     // ============================== Helpers ===============================
@@ -988,6 +971,5 @@ class XvideosXun :
 
         private const val PREF_PREFER_HLS = "prefer_hls"
         private const val PREF_BEST_CURRENT_MONTH = "best_current_month"
-        private const val PREF_LOGIN_RECHECK = "login_recheck"
     }
 }
