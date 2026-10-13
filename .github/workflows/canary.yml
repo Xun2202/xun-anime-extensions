@@ -118,7 +118,7 @@ jobs:
           SUMMARY: ${{ needs.canary.outputs.summary }}
         with:
           script: |
-            const title = '[canary] XvXun / RouXun 解析器与站点当前结构不匹配';
+            const title = '[canary] XvXun / RouXun / Rule34Video Xun 解析器与站点当前结构不匹配';
             const label = 'canary';
             const outcome = process.env.OUTCOME;
             const summary = process.env.SUMMARY || '';

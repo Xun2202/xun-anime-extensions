@@ -194,7 +194,7 @@ CANARY_LIVE=1 ./gradlew \
 - 每天 UTC 02:17（北京 10:17），也可以在 Actions 里手动触发。
 - 设 `CANARY_LIVE=1`，只跑两个 `*LiveCanaryTest`：抓几页公开页面，用插件自己的解析器做断言。
 - 站点不可达，或者返回 Cloudflare 挑战页：该用例记为 skipped，**不算失败**。
-- 定时运行要**连续两次**失败才开 issue。标题固定为 `[canary] XvXun / RouXun 解析器与站点当前结构不匹配`，标签 `canary`。中间只失败一次（站点抽风）不会开。
+- 定时运行要**连续两次**失败才开 issue。标题固定为 `[canary] XvXun / RouXun / Rule34Video Xun 解析器与站点当前结构不匹配`（2026-10-13 加入 Rule34Video Xun 的在线用例后改名），标签 `canary`。中间只失败一次（站点抽风）不会开。
 - 已经开着的同题 issue 上，后续失败会再评论一次，不重复开。
 - 恢复通过后，定时运行自动评论并关闭该 issue。手动触发的成功运行不负责开关 issue（只有 `schedule` 事件会）。
 - 测试报告上传为 artifact `canary-test-reports`，保留 14 天。
