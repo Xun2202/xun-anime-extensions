@@ -1,8 +1,8 @@
 name: Canary (live site checks)
 
 # Runs on GitHub-hosted runners only. It fetches a few public pages of the sites that XvXun / RouXun /
-# Rule34Video Xun scrape, feeds them through the extensions' own parsers (the *LiveCanaryTest classes)
-# and opens an issue when the structure no longer matches. Nothing here runs on users' phones.
+# Rule34Video Xun / e621 scrape, feeds them through the extensions' own parsers (the *LiveCanaryTest
+# classes) and opens an issue when the structure no longer matches. Nothing here runs on users' phones.
 
 on:
   schedule:
@@ -50,6 +50,7 @@ jobs:
             :src:all:xvideosxun:testDebugUnitTest \
             :src:all:rouxun:testDebugUnitTest \
             :src:en:rule34videoxun:testDebugUnitTest \
+            :src:all:e621:testDebugUnitTest \
             --tests '*LiveCanary*' --continue --no-configuration-cache
 
       - name: Summarize JUnit results
@@ -118,7 +119,7 @@ jobs:
           SUMMARY: ${{ needs.canary.outputs.summary }}
         with:
           script: |
-            const title = '[canary] XvXun / RouXun / Rule34Video Xun 解析器与站点当前结构不匹配';
+            const title = '[canary] XvXun / RouXun / Rule34Video Xun / e621 解析器与站点当前结构不匹配';
             const label = 'canary';
             const outcome = process.env.OUTCOME;
             const summary = process.env.SUMMARY || '';
