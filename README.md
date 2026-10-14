@@ -153,6 +153,32 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 CANARY_LIVE=1 ./gradlew :src:en:rule34videoxun:testDebugUnitTest --tests '*LiveCanary*'
 ```
 
+### e621 — `src/all/e621`（v1，APK 14.1）
+
+e621.net 的视频帖。不登录，只走公开 JSON（`/posts.json`、`/tags.json`）。用来补别的插件没有的成片：标签 `vicineko` 在 e621 上有 12 个帖子（2026-10 核对，9 个 webm、3 个 mp4），其中 `6365066`（Mona X Slime - An Intimate Offering，约 9 分钟，720p webm）是 Rule34Video / Hanime1 都没有的。
+
+- **只收视频**。每个请求的标签里都带 `~type:webm ~type:mp4`。这是 e621 的 OR：单独 `type:webm` 只有 webm，加上 OR 之后 mp4 也会出现。普通搜索、热门、最新都是一个帖子一个条目、一集。
+- **热门** = `order:score`，**最新** = 站点默认排序（新帖在前）。
+- **筛选**：排序（默认 / 评分 / 收藏数 / 最新），以及一个附加标签文本框（原样拼进搜索）。
+- **作者合集**：搜索框里的词如果和某个 artist 标签完全一致（category 1，用 `tags.json` 核对），结果第一条是「作者合集：vicineko」这种条目，地址 `/collection/artist/<标签>`，可以加入书架。也可以直接搜 `artist:vicineko`。剧集是该作者的全部视频帖，按发布时间排列（新的集号更大），集名是标题加时长。最多翻 10 页，每页 320 条。
+- **清晰度**：原始文件（`file.url`），再加上 `sample.alternates` 里实际有的档（常见是 720p / 480p 样本，以及一份同分辨率的 MP4）。默认按分辨率从高到低。扩展设置里的「首选清晰度」可选最高 / 720p / 480p。
+- **限速**：客户端每秒最多 2 个请求。User-Agent 固定为 `Anikku-e621-extension/1.0 (by Xun2202 on github)`，这是 e621 要求的描述性 UA。不需要登录。
+- 匿名状态下被隐藏、`file.url` 为空的帖子会跳过，不会把列表弄崩。作者名用 artist 标签；`sound_warning`、`third-party_edit` 在站上虽然也是 artist 分类，但是警告标记，不写进作者，避免点作者时搜到警告标签。
+
+已知限制：e621 的收录仍然有限（vicineko 就是这 12 个帖子）。样本档的像素高度经常不是标签上的 720 / 480，偏好按站点给的档位选。想支持正版请走作者本人的 Patreon（ViciNeko）/ SubscribeStar（vicineko）。
+
+本机测试（不访问网站时，在线那条会跳过）：
+
+```bash
+./gradlew :src:all:e621:testDebugUnitTest
+```
+
+要打真实网站（只拉 `tags=vicineko` 的 JSON，不下视频文件）：
+
+```bash
+CANARY_LIVE=1 ./gradlew :src:all:e621:testDebugUnitTest --tests '*LiveCanary*'
+```
+
 ## 鲁棒性 / 金丝雀
 
 2026-10-13 按「全做」落地（`a9463c9` … `767dabf`，9 个提交）。目标：网站改版时不要再静默显示空标题 / 空列表，而是当场告诉用户去更新插件；同时在 GitHub 上每天自动看一眼公开页面，坏了先开 issue。
@@ -192,9 +218,9 @@ CANARY_LIVE=1 ./gradlew \
 定义在 [`.github/workflows/canary.yml`](./.github/workflows/canary.yml)。**只在 GitHub Actions 上跑，不在用户手机上，不耗用户流量。**
 
 - 每天 UTC 02:17（北京 10:17），也可以在 Actions 里手动触发。
-- 设 `CANARY_LIVE=1`，只跑两个 `*LiveCanaryTest`：抓几页公开页面，用插件自己的解析器做断言。
+- 设 `CANARY_LIVE=1`，只跑 `*LiveCanaryTest`：抓几页公开页面，用插件自己的解析器做断言。
 - 站点不可达，或者返回 Cloudflare 挑战页：该用例记为 skipped，**不算失败**。
-- 定时运行要**连续两次**失败才开 issue。标题固定为 `[canary] XvXun / RouXun / Rule34Video Xun 解析器与站点当前结构不匹配`（2026-10-13 加入 Rule34Video Xun 的在线用例后改名），标签 `canary`。中间只失败一次（站点抽风）不会开。
+- 定时运行要**连续两次**失败才开 issue。标题固定为 `[canary] XvXun / RouXun / Rule34Video Xun / e621 解析器与站点当前结构不匹配`（2026-10-14 加入 e621 的在线用例后改名），标签 `canary`。中间只失败一次（站点抽风）不会开。
 - 已经开着的同题 issue 上，后续失败会再评论一次，不重复开。
 - 恢复通过后，定时运行自动评论并关闭该 issue。手动触发的成功运行不负责开关 issue（只有 `schedule` 事件会）。
 - 测试报告上传为 artifact `canary-test-reports`，保留 14 天。
