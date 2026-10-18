@@ -1,0 +1,8 @@
+ext {
+    extName = 'Kemono Xun'
+    extClass = '.KemonoXun'
+    extVersionCode = 1
+    isNsfw = true
+}
+
+apply plugin: "kei.plugins.extension.legacy"
