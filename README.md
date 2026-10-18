@@ -179,6 +179,39 @@ e621.net 的视频帖。不登录，只走公开 JSON（`/posts.json`、`/tags.j
 CANARY_LIVE=1 ./gradlew :src:all:e621:testDebugUnitTest --tests '*LiveCanary*'
 ```
 
+### Kemono Xun — `src/all/kemonoxun`（v1）
+
+Kemono（默认 `https://kemono.cr`）上的创作者视频，不登录。同一套接口也能切到 Coomer（`https://coomer.st`）。2026-10-18 核对：`kemono.su` / `kemono.party` 已经 NXDOMAIN；`kemono.st` 不是可用镜像。接口必须带 `Accept: text/css`，否则 403；正文仍是 JSON。
+
+- **一条番 = 一个创作者**，地址 `/{service}/user/{id}`，标题是名字，作者是服务名（Patreon、Pixiv Fanbox……），封面是 `img.<主机>/icons/{service}/{id}`。**一集 = 一篇里至少有一个视频文件的帖子**，地址 `/{service}/user/{id}/post/{postId}`。视频后缀只认 mp4、m4v、mov、webm、mkv、avi。zip / rar / 7z / psd / pdf 不算，哪怕文件名里写了 mp4。一篇里有多个视频时仍是一集，播放列表里每条用文件名当清晰度（文件名里的 4K / 1080 会排到前面）。
+- **热门**按收藏数，**最新**按 `updated`。都是先把创作者列表拉下来，在本地每页 50 人。Discord 直接丢掉。
+- **搜索创作者**是名字的大小写不敏感子串。筛选：服务（点一次包含、再点排除）、排序（收藏数 / 最近更新 / 名称）。
+- **近期视频帖**不按创作者折叠。2026-10-18 实测：不带词的 `/api/v1/posts` 最新 50 条里只有 2 条真视频，后面抽查的几页是 0；`q=mp4` 的第一页 50 条里有 39 条附件真是 mp4。站点没有「这个人发过视频」这种标记，创作者列表也不带帖子类型。所以这个模式把搜索词原样交给 `/api/v1/posts?q=`（搜索框空着就用 `mp4`），**每一条带视频的帖子单独成一张卡片**，打开只播这一帖。要追更，把创作者链接贴进搜索框。
+- **粘贴链接**可以直接跳：`https://kemono.cr/patreon/user/49965584` 打开该创作者，帖子链接打开那一帖。Coomer 的链接也同样认，书架里存的是不带域名的路径，换站点不用重新添加。
+- **扩展设置**：站点（kemono.cr / coomer.st）、自定义 https 地址（留空则用列表；不接受 http 或带路径）、每个创作者最多翻多少页帖子（默认 10 页 = 500 帖，上限 100 页）。某一页不足 50 条，或接口返回 `Offset N is bigger than total count`（HTTP 400），就停，不当成失败。
+- **限速**大约每秒 1 个请求。遇到 429 会等 2 秒、4 秒、8 秒，最多再试 3 次。创作者全表约 10.8 万条、压缩后大约 3.4MB，内存和缓存目录各留一份，30 分钟内不重复下。
+- 创作者在已加载的页里没有视频时，章节列表是空的，简介里会写「已加载的帖子里没有视频」。403、返回网页、超时，都会给出中英两句说明；403 / 验证页建议先用 WebView 打开站点。
+
+已知限制：只收视频帖，图片帖和压缩包不会出现在章节里。播放地址用站点自己的 `/data/...?f=文件名`，由播放器跟随 302 到 `n1`–`n4.kemono.cr`；这些文件服务器经常连不上（本机 IPv4 / IPv6、HTTP/2 / HTTP/1.1 都试过，TCP 超时），缩略图走 `img.` 则正常。第一次打开热门或搜索会下载整份创作者列表。登录后的收藏夹接口是 401，这个扩展不做。afdian 在筛选里，但当天的创作者表里是 0 人。
+
+本机测试（不访问网站时，在线那条会跳过）：
+
+```bash
+./gradlew :src:all:kemonoxun:testDebugUnitTest
+```
+
+要打真实网站（拉 ViciNeko 的第一页帖子和帖子 `150370074` 的 JSON，不下视频文件）：
+
+```bash
+CANARY_LIVE=1 ./gradlew :src:all:kemonoxun:testDebugUnitTest --tests '*LiveCanary*'
+```
+
+要再对几个创作者的第一条视频做 Range 请求（确认 302 和文件服务器是否通；超时记在日志里，不当成解析失败）：
+
+```bash
+KEMONO_PROBE_VIDEOS=1 ./gradlew :src:all:kemonoxun:testDebugUnitTest --tests '*livePlayableChain*'
+```
+
 ## 鲁棒性 / 金丝雀
 
 2026-10-13 按「全做」落地（`a9463c9` … `767dabf`，9 个提交）。目标：网站改版时不要再静默显示空标题 / 空列表，而是当场告诉用户去更新插件；同时在 GitHub 上每天自动看一眼公开页面，坏了先开 issue。
@@ -220,7 +253,7 @@ CANARY_LIVE=1 ./gradlew \
 - 每天 UTC 02:17（北京 10:17），也可以在 Actions 里手动触发。
 - 设 `CANARY_LIVE=1`，只跑 `*LiveCanaryTest`：抓几页公开页面，用插件自己的解析器做断言。
 - 站点不可达，或者返回 Cloudflare 挑战页：该用例记为 skipped，**不算失败**。
-- 定时运行要**连续两次**失败才开 issue。标题固定为 `[canary] XvXun / RouXun / Rule34Video Xun / e621 解析器与站点当前结构不匹配`（2026-10-14 加入 e621 的在线用例后改名），标签 `canary`。中间只失败一次（站点抽风）不会开。
+- 定时运行要**连续两次**失败才开 issue。标题固定为 `[canary] XvXun / RouXun / Rule34Video Xun / e621 / Kemono Xun 解析器与站点当前结构不匹配`（2026-10-18 加入 Kemono Xun 的在线用例后改名），标签 `canary`。中间只失败一次（站点抽风）不会开。
 - 已经开着的同题 issue 上，后续失败会再评论一次，不重复开。
 - 恢复通过后，定时运行自动评论并关闭该 issue。手动触发的成功运行不负责开关 issue（只有 `schedule` 事件会）。
 - 测试报告上传为 artifact `canary-test-reports`，保留 14 天。
