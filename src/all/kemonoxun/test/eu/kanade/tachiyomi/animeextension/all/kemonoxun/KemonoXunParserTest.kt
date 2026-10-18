@@ -96,7 +96,8 @@ class KemonoXunParserTest {
         assertEquals(2160, links[0].resolution)
         assertTrue(links[0].label.contains("4K_h265.mp4"))
         assertEquals(1080, links[1].resolution)
-        assertTrue(links[0].url.startsWith("https://kemono.cr/data/52/29/"))
+        assertTrue(links[0].url.startsWith("https://n4.kemono.cr/data/52/29/"))
+        assertTrue(links[1].url.startsWith("https://n2.kemono.cr/data/b0/07/"))
         assertTrue(links[0].url.contains(".mp4?f=MdlwS_WIP8_WrappedInSlime_4K_h265.mp4"))
         assertTrue(links.none { it.url.contains(".gif") })
         val episode = KemonoXunParser.episodeFromDetail(detail, KemonoXunParser.DEFAULT_BASE)!!
@@ -219,6 +220,7 @@ class KemonoXunParserTest {
         )
         assertTrue(note.contains("https://kemono.cr/patreon/user/49965584"))
         assertTrue(note.contains(KemonoXunParser.NO_VIDEO_NOTE))
+        assertTrue(note.contains(KemonoXunParser.FILE_HOST_NOTE))
         val profile = KemonoXunParser.parseProfile(
             """{"id":"49965584","name":"ViciNeko","service":"patreon","indexed":"2021-05-12T04:41:47.970437","updated":"2026-02-19T22:35:51.538980","public_id":"ViciNeko","post_count":345}""",
         )
@@ -275,6 +277,77 @@ class KemonoXunParserTest {
         )
         assertEquals("1", brokenSearch.single().id)
         assertTrue(KemonoXunParser.hasVideo(brokenSearch.single()))
+    }
+
+    @Test
+    fun fileServerUrlAndProbeClassification() {
+        assertEquals(
+            "https://n4.kemono.cr/data/aa/bb/file.mp4?f=clip.mp4",
+            KemonoXunParser.fileUrl("https://kemono.cr", "/aa/bb/file.mp4", "clip.mp4", "https://n4.kemono.cr/"),
+        )
+        assertEquals(
+            "https://kemono.cr/data/aa/bb/file.mp4?f=clip.mp4",
+            KemonoXunParser.fileUrl("https://kemono.cr", "/aa/bb/file.mp4", "clip.mp4", "http://n4.kemono.cr"),
+        )
+        assertEquals(
+            "https://kemono.cr/data/aa/bb/file.mp4?f=clip.mp4",
+            KemonoXunParser.fileUrl("https://kemono.cr", "/aa/bb/file.mp4", "clip.mp4", null),
+        )
+        val bare = KemonoXunParser.videosFromDetail(
+            KemonoXunParser.PostDetail(
+                post = KemonoXunParser.Post(
+                    id = "1",
+                    user = "2",
+                    service = "patreon",
+                    attachments = listOf(KemonoXunParser.MediaFile(name = "a.mp4", path = "/aa/bb/a.mp4")),
+                ),
+            ),
+            "https://kemono.cr",
+        )
+        assertEquals("https://kemono.cr/data/aa/bb/a.mp4?f=a.mp4", bare.single().url)
+        val hosted = KemonoXunParser.videosFromDetail(
+            KemonoXunParser.PostDetail(
+                post = KemonoXunParser.Post(
+                    id = "1",
+                    user = "2",
+                    service = "patreon",
+                    attachments = listOf(KemonoXunParser.MediaFile(name = "a.mp4", path = "/aa/bb/a.mp4")),
+                ),
+                attachments = listOf(
+                    KemonoXunParser.MediaFile(
+                        name = "a.mp4",
+                        path = "/aa/bb/a.mp4",
+                        server = "https://n3.kemono.cr",
+                    ),
+                ),
+            ),
+            "https://coomer.st",
+        )
+        assertEquals("https://n3.kemono.cr/data/aa/bb/a.mp4?f=a.mp4", hosted.single().url)
+        assertEquals("n3.kemono.cr", KemonoXunParser.fileHost(hosted.single().url))
+
+        val fourK = KemonoXunParser.VideoLink("https://n4.kemono.cr/data/aa/a.mp4?f=4k.mp4", "4k.mp4", 2160)
+        val hd = KemonoXunParser.VideoLink("https://n2.kemono.cr/data/bb/b.mp4?f=hd.mp4", "hd.mp4", 1080)
+        val bothDown = KemonoXunParser.classifyPlayback(
+            listOf(fourK, hd),
+            mapOf("n4.kemono.cr" to false, "n2.kemono.cr" to false),
+        ) as KemonoXunParser.PlaybackChoice.Blocked
+        assertTrue(bothDown.message.contains("n4.kemono.cr"))
+        assertTrue(bothDown.message.contains("n2.kemono.cr"))
+        assertTrue(bothDown.message.contains("站点故障，不是插件问题"))
+        assertTrue(bothDown.message.contains("file server unreachable"))
+
+        val mixed = KemonoXunParser.classifyPlayback(
+            listOf(fourK, hd),
+            mapOf("n4.kemono.cr" to false, "n2.kemono.cr" to true),
+        ) as KemonoXunParser.PlaybackChoice.Ready
+        assertEquals(listOf("hd.mp4", "4k.mp4" + KemonoXunParser.UNREACHABLE_LABEL), mixed.links.map { it.label })
+        assertEquals(hd.url, mixed.links[0].url)
+
+        val unknown = KemonoXunParser.classifyPlayback(listOf(fourK), emptyMap()) as KemonoXunParser.PlaybackChoice.Ready
+        assertEquals(fourK, unknown.links.single())
+        val empty = KemonoXunParser.classifyPlayback(emptyList(), emptyMap()) as KemonoXunParser.PlaybackChoice.Blocked
+        assertEquals(KemonoXunParser.NO_PLAYABLE_MESSAGE, empty.message)
     }
 
     private fun text(name: String): String = javaClass.classLoader?.getResource(name)?.readText()

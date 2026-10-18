@@ -37,9 +37,11 @@ import java.time.ZoneOffset
  * - `/api/v1/posts?q=&o=` is `{count, true_count, posts}`. An empty `q` is the global recent feed
  *   (about 2 videos in the newest 50, then 0 in the next sampled pages). `q=mp4` was 39/50 real
  *   video files. There is no cheap "creators who have posted video" flag.
- * - Post detail adds `videos[]` with `server` (`https://n4.kemono.cr`), `name`, `path`, `extension`.
- *   Playback uses `https://<base>/data<path>?f=<name>`. The base host 302s to `n*` and keeps `f`.
- *   `n*` often times out; this parser does not pre-resolve that redirect.
+ * - Post detail adds `videos[]` and `attachments[]` with `server` (`https://n4.kemono.cr`), `name`, `path`,
+ *   `extension`. Playback is `{server}/data{path}?f={name}` when `server` is a valid https origin,
+ *   otherwise `{base}/data{path}?f={name}`. `n1`–`n4` (and `n*.coomer.st`) have been unreachable on
+ *   port 443 since about 2026-04; the source probes those hosts before play. This parser only classifies
+ *   the probe results.
  * - Discord creators are dropped from browse. Favorites need a login cookie (401) and are not used.
  */
 object KemonoXunParser {
@@ -80,6 +82,12 @@ object KemonoXunParser {
         "找不到服务器。请检查扩展设置里的站点地址。 / Could not resolve the host. Check the base URL in extension settings."
     const val BAD_JSON_MESSAGE = "站点返回的不是预期的 JSON。 / The site did not return the expected JSON."
     const val NO_PLAYABLE_MESSAGE = "这条帖子没有可播放的视频。 / This post has no playable video."
+    const val FILE_HOST_NOTE = "视频文件放在 n* 服务器上，这些机器经常整站宕机，章节能列出来也不代表能播放。"
+    const val UNREACHABLE_LABEL = "（服务器不可达）"
+
+    const val PROBE_CONNECT_SECONDS = 4L
+    const val PROBE_CALL_SECONDS = 6L
+    const val HOST_PROBE_TTL_MILLIS = 5L * 60L * 1000L
 
     val BASE_CHOICES = arrayOf(DEFAULT_BASE, COOMER_BASE)
 
@@ -225,14 +233,52 @@ object KemonoXunParser {
         return "${imageOrigin(base)}/thumbnail/data$normalized"
     }
 
-    /** `https://host/data<path>?f=<name>`. The host 302s to `n*`; the player follows it. */
-    fun fileUrl(base: String, path: String, name: String?): String {
-        val root = normalizeBaseUrl(base) ?: DEFAULT_BASE
+    /**
+     * `{server}/data{path}?f={name}` when [server] is https with no path, else `{base}/data{path}?f={name}`.
+     * Skips the API host's 302 onto `n*`. The player still sends Referer for the catalogue host.
+     */
+    fun fileUrl(base: String, path: String, name: String?, server: String? = null): String {
+        val root = normalizeBaseUrl(server) ?: normalizeBaseUrl(base) ?: DEFAULT_BASE
         val normalized = if (path.startsWith("/")) path else "/$path"
         val url = "$root/data$normalized"
         if (name.isNullOrBlank()) return url
         val encoded = URLEncoder.encode(name, Charsets.UTF_8.name()).replace("+", "%20")
         return "$url?f=$encoded"
+    }
+
+    fun fileHost(url: String): String = runCatching {
+        java.net.URI(url).host?.lowercase().orEmpty()
+    }.getOrDefault("")
+
+    /** Shown when every file host for one episode failed the reachability probe. */
+    fun fileServerMessage(hosts: Collection<String>): String {
+        val shown = hosts.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val who = if (shown.isEmpty()) "n*" else shown.joinToString("、")
+        return "文件服务器 $who 当前连不上（站点故障，不是插件问题），稍后再试 / file server unreachable"
+    }
+
+    /**
+     * [reachable] is host to probe result. A missing host is kept (the probe did not run).
+     * Reachable links stay in their existing order, then unreachable ones with [UNREACHABLE_LABEL].
+     * When every link is explicitly unreachable, returns [PlaybackChoice.Blocked] instead of a list.
+     */
+    fun classifyPlayback(links: List<VideoLink>, reachable: Map<String, Boolean>): PlaybackChoice {
+        if (links.isEmpty()) return PlaybackChoice.Blocked(NO_PLAYABLE_MESSAGE)
+        val up = ArrayList<VideoLink>(links.size)
+        val down = ArrayList<VideoLink>()
+        val downHosts = LinkedHashSet<String>()
+        for (link in links) {
+            val host = fileHost(link.url)
+            if (host.isNotEmpty() && reachable[host] == false) {
+                downHosts += host
+                val label = if (UNREACHABLE_LABEL in link.label) link.label else link.label + UNREACHABLE_LABEL
+                down += link.copy(label = label)
+            } else {
+                up += link
+            }
+        }
+        if (up.isEmpty()) return PlaybackChoice.Blocked(fileServerMessage(downHosts))
+        return PlaybackChoice.Ready(up + down)
     }
 
     fun recentQuery(raw: String): String = raw.trim().ifEmpty { DEFAULT_RECENT_QUERY }
@@ -436,7 +482,10 @@ object KemonoXunParser {
         fun add(file: MediaFile?) {
             if (file == null || !isVideo(file)) return
             val key = file.path?.takeIf { it.isNotBlank() } ?: file.name?.takeIf { it.isNotBlank() } ?: return
-            files.putIfAbsent(key, file)
+            val existing = files[key]
+            if (existing == null || (existing.server.isNullOrBlank() && !file.server.isNullOrBlank())) {
+                files[key] = file
+            }
         }
         detail.videos.orEmpty().forEach(::add)
         add(detail.post?.file)
@@ -445,7 +494,7 @@ object KemonoXunParser {
         val links = files.values.mapNotNull { file ->
             val path = file.path?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             VideoLink(
-                url = fileUrl(base, path, file.name),
+                url = fileUrl(base, path, file.name, file.server),
                 label = labelOf(file),
                 resolution = resolutionHint(file),
             )
@@ -485,6 +534,8 @@ object KemonoXunParser {
                 append(NO_VIDEO_NOTE)
             }
         }
+        append('\n')
+        append(FILE_HOST_NOTE)
     }
 
     fun publishedMillis(text: String?): Long {
@@ -555,7 +606,8 @@ object KemonoXunParser {
     private fun postCardDescription(post: Post): String = buildString {
         append("创作者 ")
         append(creatorPath(post.service, post.user))
-        append("\n这一条是视频帖，打开后只有这一集。要追更，把创作者链接贴进搜索框。")
+        append("\n这一条是视频帖，打开后只有这一集。要追更，把创作者链接贴进搜索框。\n")
+        append(FILE_HOST_NOTE)
         val extra = plainText(post.content).ifBlank { post.substring?.trim().orEmpty() }
         if (extra.isNotEmpty()) {
             append("\n\n")
@@ -658,6 +710,11 @@ object KemonoXunParser {
     )
 
     data class VideoLink(val url: String, val label: String, val resolution: Int)
+
+    sealed class PlaybackChoice {
+        data class Ready(val links: List<VideoLink>) : PlaybackChoice()
+        data class Blocked(val message: String) : PlaybackChoice()
+    }
 
     /**
      * Memory plus a JSON file in the app cache dir. [CREATOR_CACHE_TTL_MILLIS] is 30 minutes,

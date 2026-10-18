@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.animeextension.all.kemonoxun
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -17,11 +18,15 @@ import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.applicationContext
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.io.File
@@ -57,6 +62,21 @@ class KemonoXun :
         .build()
 
     private val preferences by getPreferencesLazy()
+
+    /** Separate from [client]: no 1 req/s limit, and a short cap so a dead n* host fails fast. */
+    private val probeClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(KemonoXunParser.PROBE_CONNECT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(KemonoXunParser.PROBE_CONNECT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(KemonoXunParser.PROBE_CALL_SECONDS, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .retryOnConnectionFailure(false)
+            .build()
+    }
+
+    private val reachMutex = Mutex()
+    private val reachCache = HashMap<String, Reach>()
 
     private val creatorCache by lazy {
         KemonoXunParser.CreatorCache(File(cacheDir(), "kemonoxun"))
@@ -177,7 +197,10 @@ class KemonoXun :
         val link = KemonoXunParser.parseDirectLink(episode.url) as? KemonoXunParser.DirectLink.Post
             ?: throw IllegalStateException(KemonoXunParser.NO_PLAYABLE_MESSAGE)
         val detail = loadDetail(link)
-        return videosFrom(detail)
+        val links = KemonoXunParser.videosFromDetail(detail, baseUrl)
+        if (links.isEmpty()) throw IllegalStateException(KemonoXunParser.NO_PLAYABLE_MESSAGE)
+        val chosen = if (probeFileServers()) filterByProbe(links) else links
+        return toVideos(chosen)
     }
 
     override fun videoListParse(response: Response): List<Video> {
@@ -231,6 +254,13 @@ class KemonoXun :
             entryValues = pageValues
             setDefaultValue(KemonoXunParser.DEFAULT_POST_PAGES.toString())
             summary = "%s\n每页 50 帖，只保留里面的视频。越大越慢。"
+        }.also(screen::addPreference)
+
+        SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_PROBE
+            title = "播放前检测文件服务器"
+            summary = "打开一集前先连一下 n* 文件服务器（每个主机大约 4 秒，结果缓存 5 分钟）。全部连不上时直接说明是站点故障。关掉则照常把地址交给播放器。"
+            setDefaultValue(true)
         }.also(screen::addPreference)
     }
 
@@ -392,6 +422,10 @@ class KemonoXun :
     private fun videosFrom(detail: KemonoXunParser.PostDetail): List<Video> {
         val links = KemonoXunParser.videosFromDetail(detail, baseUrl)
         if (links.isEmpty()) throw IllegalStateException(KemonoXunParser.NO_PLAYABLE_MESSAGE)
+        return toVideos(links)
+    }
+
+    private fun toVideos(links: List<KemonoXunParser.VideoLink>): List<Video> {
         val playback = playbackHeaders()
         return links.map { link ->
             Video(
@@ -401,6 +435,69 @@ class KemonoXun :
                 headers = playback,
             )
         }
+    }
+
+    private fun probeFileServers(): Boolean = preferences.getBoolean(PREF_PROBE, true)
+
+    private suspend fun filterByProbe(links: List<KemonoXunParser.VideoLink>): List<KemonoXunParser.VideoLink> {
+        val samples = LinkedHashMap<String, String>()
+        for (link in links) {
+            val host = KemonoXunParser.fileHost(link.url)
+            if (host.isNotEmpty()) samples.putIfAbsent(host, link.url)
+        }
+        val reach = probeHosts(samples)
+        return when (val choice = KemonoXunParser.classifyPlayback(links, reach)) {
+            is KemonoXunParser.PlaybackChoice.Blocked -> throw IllegalStateException(choice.message)
+            is KemonoXunParser.PlaybackChoice.Ready -> choice.links
+        }
+    }
+
+    private suspend fun probeHosts(samples: Map<String, String>): Map<String, Boolean> {
+        val now = System.currentTimeMillis()
+        val pending = LinkedHashMap<String, String>()
+        val known = HashMap<String, Boolean>()
+        reachMutex.withLock {
+            for ((host, sample) in samples) {
+                val cached = reachCache[host]
+                if (cached != null && now - cached.at <= KemonoXunParser.HOST_PROBE_TTL_MILLIS) {
+                    known[host] = cached.ok
+                } else {
+                    pending[host] = sample
+                }
+            }
+        }
+        if (pending.isEmpty()) return known
+        val fresh = coroutineScope {
+            pending.map { (host, sample) ->
+                async { host to probeOne(sample) }
+            }.awaitAll()
+        }
+        val stamped = System.currentTimeMillis()
+        reachMutex.withLock {
+            for ((host, ok) in fresh) {
+                reachCache[host] = Reach(ok, stamped)
+                known[host] = ok
+            }
+        }
+        return known
+    }
+
+    /** Any HTTP status means TCP/TLS reached this host. A timeout or connect failure does not. */
+    private suspend fun probeOne(url: String): Boolean = try {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", KemonoXunParser.USER_AGENT)
+            .header("Referer", baseUrl.trimEnd('/') + "/")
+            .header("Accept", "*/*")
+            .header("Range", "bytes=0-0")
+            .build()
+        probeClient.newCall(request).await().use { response ->
+            response.code in 100..599
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        false
     }
 
     private suspend fun getJson(url: String): String {
@@ -567,10 +664,13 @@ class KemonoXun :
 
     private data class Fetched(val code: Int, val body: String)
 
+    private data class Reach(val ok: Boolean, val at: Long)
+
     companion object {
         private const val PREF_BASE = "base_url"
         private const val PREF_BASE_CUSTOM = "base_url_custom"
         private const val PREF_MAX_PAGES = "max_post_pages"
+        private const val PREF_PROBE = "probe_file_servers"
         private const val MODE_CREATORS = "creators"
         private const val MODE_VIDEOS = "videos"
     }
