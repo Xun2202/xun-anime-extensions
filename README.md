@@ -16,6 +16,19 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 
 ## 扩展列表
 
+### XNXX Xun — `src/all/xnxxxun`（v1，APK 14.1）
+
+独立于原版 Xnxx 的新扩展，可同时安装；已有书架条目需要在 Anikku 中迁移来源到 **XNXX Xun**。
+
+- 修复网站改版后的热门 / 搜索卡片解析，支持下一页；热门使用当月 Best。
+- 详情读取站点元数据，相关推荐使用当前作品的 `video_related`，不拿热门列表充当推荐。
+- 播放提供 HLS 分画质与 MP4 High / Low，携带站点请求头；扩展设置可选首选视频源。
+- 暂无“最新”：站点 `/new` 当前返回 404，首页是类别占位，避免误标内容。
+
+安装：刷新本仓的扩展列表，搜索 **XNXX Xun** 并安装、信任；无需卸载原版。2026-10-24 已抽查热门与搜索分页、40 条相关推荐，HLS 主清单和两路 MP4 的最小 Range 请求均返回 206；完整播放与拖动进度待真机反馈。
+
+解析回归：`./gradlew :src:all:xnxxxun:testDebugUnitTest`（合成夹具，不访问站点）。
+
 ### XvXun（定制版 Xvideos）— `src/all/xvideosxun`（v11，APK 14.11）
 
 相比官方仓库里的 Xvideos 扩展多出：

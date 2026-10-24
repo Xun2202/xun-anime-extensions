@@ -65,7 +65,21 @@ jobs:
         run: |
           TASKS=$(for m in $MODULES; do printf '%s:assembleRelease ' "$m"; done)
           echo "Building: $TASKS"
-          ./gradlew $TASKS
+          ./gradlew :src:all:xnxxxun:testDebugUnitTest --tests '*XnxxXunParserTest' $TASKS
+
+      - name: Verify XNXX Xun signing certificate
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          expected = json.loads(pathlib.Path('repo.json').read_text())['meta']['signingKeyFingerprint']
+          apksigner = sorted(pathlib.Path(os.environ['ANDROID_HOME']).glob('build-tools/*/apksigner'))[-1]
+          apks = list(pathlib.Path('src/all/xnxxxun/build/outputs/apk/release').glob('*.apk'))
+          assert len(apks) == 1, 'Expected one signed XNXX Xun APK'
+          output = subprocess.check_output([str(apksigner), 'verify', '--print-certs', str(apks[0])], text=True)
+          actual = re.search(r'Signer #1 certificate SHA-256 digest: ([0-9a-f]+)', output).group(1)
+          assert actual == expected, 'Extension signing certificate differs from repo metadata'
+          print('XNXX Xun APK signature verified:', actual)
+          PY
 
       - name: Clean up signing key
         if: always()
