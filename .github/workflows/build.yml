@@ -76,7 +76,9 @@ jobs:
           apks = list(pathlib.Path('src/all/xnxxxun/build/outputs/apk/release').glob('*.apk'))
           assert len(apks) == 1, 'Expected one signed XNXX Xun APK'
           output = subprocess.check_output([str(apksigner), 'verify', '--print-certs', str(apks[0])], text=True)
-          actual = re.search(r'Signer #1 certificate SHA-256 digest: ([0-9a-f]+)', output).group(1)
+          match = re.search(r'(?m)^Signer[^\n]*certificate SHA-256 digest:\s*([0-9A-Fa-f:]+)', output)
+          assert match, 'No signing certificate found in apksigner output: ' + output
+          actual = match.group(1).replace(':', '').lower()
           assert actual == expected, 'Extension signing certificate differs from repo metadata'
           print('XNXX Xun APK signature verified:', actual)
           PY
