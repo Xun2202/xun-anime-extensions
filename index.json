@@ -1,0 +1,128 @@
+[
+  {
+    "name": "Aniyomi: e621",
+    "pkg": "eu.kanade.tachiyomi.animeextension.all.e621",
+    "apk": "aniyomi-all.e621-v14.1.apk",
+    "lang": "all",
+    "code": 1,
+    "version": "14.1",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "e621",
+        "lang": "all",
+        "id": "3580576879040377475",
+        "baseUrl": "https://e621.net",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Aniyomi: Kemono Xun",
+    "pkg": "eu.kanade.tachiyomi.animeextension.all.kemonoxun",
+    "apk": "aniyomi-all.kemonoxun-v14.1.apk",
+    "lang": "all",
+    "code": 1,
+    "version": "14.1",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "Kemono Xun",
+        "lang": "all",
+        "id": "7615328174460064731",
+        "baseUrl": "https://kemono.cr",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Aniyomi: RouXun",
+    "pkg": "eu.kanade.tachiyomi.animeextension.all.rouxun",
+    "apk": "aniyomi-all.rouxun-v14.4.apk",
+    "lang": "all",
+    "code": 4,
+    "version": "14.4",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "RouXun",
+        "lang": "all",
+        "id": "644417113629169000",
+        "baseUrl": "https://rou.video",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Aniyomi: XNXX Xun",
+    "pkg": "eu.kanade.tachiyomi.animeextension.all.xnxxxun",
+    "apk": "aniyomi-all.xnxxxun-v14.1.apk",
+    "lang": "all",
+    "code": 1,
+    "version": "14.1",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "XNXX Xun",
+        "lang": "all",
+        "id": "8613240366401845913",
+        "baseUrl": "https://www.xnxx.com",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Aniyomi: XvXun",
+    "pkg": "eu.kanade.tachiyomi.animeextension.all.xvideosxun",
+    "apk": "aniyomi-all.xvideosxun-v14.11.apk",
+    "lang": "all",
+    "code": 11,
+    "version": "14.11",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "XvXun",
+        "lang": "all",
+        "id": "5320004989093205933",
+        "baseUrl": "https://www.xvideos.com",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Aniyomi: Rule34Video Xun",
+    "pkg": "eu.kanade.tachiyomi.animeextension.en.rule34videoxun",
+    "apk": "aniyomi-en.rule34videoxun-v14.11.apk",
+    "lang": "en",
+    "code": 11,
+    "version": "14.11",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "Rule34Video",
+        "lang": "en",
+        "id": "9212790518101043860",
+        "baseUrl": "https://rule34video.com",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Aniyomi: Hanime1.me Xun",
+    "pkg": "eu.kanade.tachiyomi.animeextension.zh.hanime1xun",
+    "apk": "aniyomi-zh.hanime1xun-v14.8.apk",
+    "lang": "zh",
+    "code": 8,
+    "version": "14.8",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "Hanime1.me",
+        "lang": "zh",
+        "id": "2853734405579058222",
+        "baseUrl": "https://hanime1.me",
+        "versionId": 1
+      }
+    ]
+  }
+]
