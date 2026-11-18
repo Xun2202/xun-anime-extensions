@@ -1,12 +1,22 @@
 ext {
     extName = 'Jellyfin Xun'
     extClass = '.JellyfinXun'
-    extVersionCode = 3
+    extVersionCode = 4
     isNsfw = false
 }
 
 apply plugin: "kei.plugins.extension.legacy"
 
 dependencies {
+    compileOnly 'androidx.preference:preference:1.2.1'
     testImplementation 'com.squareup.okhttp3:okhttp-tls:5.3.2'
 }
+
+// Compile against the host's AndroidX Preference API before the extension SDK's stubs.
+configurations.compileOnly.dependencies.with { dependencies ->
+    def extensionApi = dependencies.find { it.name == 'aniyomi-extensions-lib' }
+    dependencies.remove(extensionApi)
+    dependencies.add(extensionApi)
+}
+
+android.buildTypes.release.proguardFiles 'proguard-rules.pro'

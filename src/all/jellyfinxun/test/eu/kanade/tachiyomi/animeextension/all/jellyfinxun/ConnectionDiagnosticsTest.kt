@@ -42,22 +42,14 @@ class ConnectionDiagnosticsTest {
     }
 
     @Test
-    fun diagnosticNeverIncludesExceptionMessagesCredentialsQueryOrPath() {
+    fun diagnosticNeverIncludesEndpointOrCredentialsFromAnException() {
         val sensitive = "synthetic-test-password-and-token"
-        val report = ConnectionDiagnostics.report("14.2", LoginStage.HTTPS, "https://nas.invalid:48273/private/$sensitive?token=$sensitive", true, true, true, IOException("Password=$sensitive Authorization=$sensitive"))
+        val report = ConnectionDiagnostics.report("14.4", LoginStage.HTTPS, true, true, true, IOException("https://example.invalid:8443/private/$sensitive?token=$sensitive Password=$sensitive Authorization=$sensitive"))
         assertFalse(report.contains(sensitive))
         assertFalse(report.contains("private/"))
         assertFalse(report.contains("token="))
-        assertTrue(report.contains("https://nas.invalid:48273"))
+        assertFalse(report.contains("example.invalid"))
         assertTrue(report.contains("UNEXPECTED_IOException"))
-    }
-
-    @Test
-    fun targetWithEmbeddedAccountIsCompletelyHidden() {
-        val target = ConnectionDiagnostics.safeTarget("https://synthetic-user:synthetic-password@nas.invalid:48273")
-        assertFalse(target.contains("synthetic-user"))
-        assertFalse(target.contains("synthetic-password"))
-        assertFalse(target.contains("nas.invalid"))
     }
 
     @Test
@@ -71,9 +63,9 @@ class ConnectionDiagnosticsTest {
     @Test
     fun tlsFailureCanIdentifyProtocolOrInterruptedConnectionWithoutExposingProviderText() {
         val wrongEndpoint = SSLHandshakeException("wrong version number near synthetic-private-text")
-        val report = ConnectionDiagnostics.report("14.3", LoginStage.HTTPS, "https://nas.invalid", true, true, true, wrongEndpoint)
+        val report = ConnectionDiagnostics.report("14.3", LoginStage.HTTPS, true, true, true, wrongEndpoint)
         assertTrue(report.contains("TLS_NOT_HTTPS"))
-        assertTrue(report.contains("NAS 直连"))
+        assertTrue(report.contains("连接 · 直连"))
         assertFalse(report.contains("synthetic-private-text"))
 
         val reset = SSLHandshakeException("Connection closed by peer")
@@ -82,18 +74,26 @@ class ConnectionDiagnosticsTest {
 
     @Test
     fun mediaLibraryPermissionFailureIsSeparateFromLoginAuthentication() {
-        val login = ConnectionDiagnostics.report("14.2", LoginStage.AUTHENTICATION, "https://nas.invalid", true, true, true, NasHttpException(401))
-        val library = ConnectionDiagnostics.report("14.2", LoginStage.LIBRARIES, "https://nas.invalid", true, true, true, NasHttpException(403))
-        assertTrue(login.contains("播放账户认证"))
+        val login = ConnectionDiagnostics.report("14.2", LoginStage.AUTHENTICATION, true, true, true, NasHttpException(401))
+        val library = ConnectionDiagnostics.report("14.2", LoginStage.LIBRARIES, true, true, true, NasHttpException(403))
+        assertTrue(login.contains("账号认证"))
         assertTrue(login.contains("HTTP_401"))
         assertTrue(library.contains("媒体库读取"))
-        assertTrue(library.contains("登录已通过"))
+        assertTrue(library.contains("有权访问媒体库"))
     }
 
     @Test
     fun localConfigurationFailureIsIdentifiedBeforeAnyNetworkDiagnosis() {
         val failure = ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, NasConfigurationException(ConfigurationIssue.CA_FINGERPRINT_MISMATCH))
         assertEquals("CA_FINGERPRINT_MISMATCH", failure.code)
-        assertTrue(failure.advice.contains("重新复制"))
+        assertTrue(failure.advice.contains("证书与指纹不匹配"))
+    }
+
+    @Test
+    fun englishReportUsesTheSameDiagnosticCode() {
+        val report = ConnectionDiagnostics.report("14.4", LoginStage.HTTPS, false, false, true, SocketTimeoutException(), chinese = false)
+        assertTrue(report.contains("Stage · HTTPS and server"))
+        assertTrue(report.contains("System proxy settings"))
+        assertTrue(report.contains("NETWORK_TIMEOUT"))
     }
 }
