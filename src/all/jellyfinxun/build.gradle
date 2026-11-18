@@ -18,3 +18,5 @@ configurations.compileOnly.dependencies.with { dependencies ->
     dependencies.remove(extensionApi)
     dependencies.add(extensionApi)
 }
+
+android.buildTypes.release.proguardFiles 'proguard-rules.pro'

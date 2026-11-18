@@ -274,291 +274,297 @@ class JellyfinXun :
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        val context = screen.context
-        val chinese = context.resources.configuration.locales[0].language == "zh"
-        fun text(zh: String, en: String) = if (chinese) zh else en
-        fun message(value: String) = Toast.makeText(context, value, Toast.LENGTH_LONG).show()
+        Settings(screen).build()
+    }
 
-        fun section(label: String) = PreferenceCategory(context).apply {
-            title = label
-            isIconSpaceReserved = false
-        }.also(screen::addPreference)
+    private inner class Settings(private val screen: PreferenceScreen) {
+        fun build() {
+            val context = screen.context
+            val chinese = context.resources.configuration.locales[0].language == "zh"
+            fun text(zh: String, en: String) = if (chinese) zh else en
+            fun message(value: String) = Toast.makeText(context, value, Toast.LENGTH_LONG).show()
 
-        val connectionSettings = section(text("连接", "Connection"))
-        val securitySettings = section(text("证书与诊断", "Certificates & diagnostics"))
+            fun section(label: String) = PreferenceCategory(context).apply {
+                title = label
+                isIconSpaceReserved = false
+            }.also(screen::addPreference)
 
-        fun action(category: PreferenceCategory, label: String, click: () -> Unit) = Preference(context).apply {
-            title = label
-            isIconSpaceReserved = false
-            setOnPreferenceClickListener {
-                click()
+            val connectionSettings = section(text("连接", "Connection"))
+            val securitySettings = section(text("证书与诊断", "Certificates & diagnostics"))
+
+            fun action(category: PreferenceCategory, label: String, click: () -> Unit) = Preference(context).apply {
+                title = label
+                isIconSpaceReserved = false
+                setOnPreferenceClickListener {
+                    click()
+                    true
+                }
+            }.also(category::addPreference)
+
+            val server = EditTextPreference(context).apply {
+                key = SERVER
+                title = text("服务器地址", "Server address")
+                dialogTitle = title
+                dialogMessage = text("输入 Jellyfin 的 HTTPS 地址，例如 https://media.example.org", "Enter the Jellyfin HTTPS address, such as https://media.example.org")
+                isPersistent = false
+                isIconSpaceReserved = false
+                setOnBindEditTextListener {
+                    it.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                    it.imeOptions = it.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                }
+            }.also(connectionSettings::addPreference)
+            val account = EditTextPreference(context).apply {
+                key = USERNAME
+                title = text("Jellyfin 账号", "Jellyfin username")
+                dialogTitle = title
+                isPersistent = false
+                isIconSpaceReserved = false
+                setOnBindEditTextListener {
+                    it.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    it.imeOptions = it.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                }
+            }.also(connectionSettings::addPreference)
+            val login = Preference(context).apply { isIconSpaceReserved = false }.also(connectionSettings::addPreference)
+            val libraries = ListPreference(context).apply {
+                key = LIBRARY
+                title = text("媒体库", "Media library")
+                dialogTitle = title
+                isPersistent = false
+                isIconSpaceReserved = false
+            }.also(connectionSettings::addPreference)
+            val logout = Preference(context).apply {
+                title = text("退出登录", "Sign out")
+                isIconSpaceReserved = false
+            }.also(connectionSettings::addPreference)
+
+            val certificate = Preference(context).apply {
+                title = text("服务器证书", "Server certificate")
+                isIconSpaceReserved = false
+            }.also(securitySettings::addPreference)
+            val test = Preference(context).apply {
+                title = text("测试连接", "Test connection")
+                summary = text("检查 HTTPS 和 Jellyfin 服务", "Check HTTPS and the Jellyfin server")
+                isIconSpaceReserved = false
+            }.also(securitySettings::addPreference)
+            val diagnostic = action(securitySettings, text("最近连接诊断", "Last connection report")) {
+                val report = setting(DIAGNOSTIC).takeIf { setting(DIAGNOSTIC_CODE).isNotBlank() }
+                showDiagnostic(context, text("最近连接诊断", "Last connection report"), report, text("尚未测试或登录", "Run a connection test or sign in first"), text("复制", "Copy"))
+            }
+
+            fun refresh() {
+                val busy = connectionActionInProgress.get()
+                val signedIn = signedIn()
+                val allLibraries = text("全部可访问的媒体库", "All accessible libraries")
+                val known = runCatching { JellyfinJson.items(JellyfinJson.parse(setting(LIBRARIES))) }.getOrDefault(emptyList())
+                server.text = setting(SERVER)
+                server.summary = setting(SERVER).ifBlank { text("填写 HTTPS 地址", "Enter an HTTPS address") }
+                account.text = setting(USERNAME)
+                account.summary = setting(USERNAME).ifBlank { text("填写普通播放账号", "Enter a playback account") }
+                login.title = if (signedIn) text("重新登录", "Sign in again") else text("登录", "Sign in")
+                login.summary = if (busy) {
+                    text("正在连接…", "Connecting…")
+                } else if (signedIn) {
+                    text("已登录", "Signed in")
+                } else {
+                    text("输入 Jellyfin 密码", "Enter your Jellyfin password")
+                }
+                libraries.entries = (listOf(allLibraries) + known.map { it.text("Name") }).toTypedArray()
+                libraries.entryValues = (listOf("") + known.map { it.text("Id") }).toTypedArray()
+                libraries.value = setting(LIBRARY).takeIf { it in libraries.entryValues }.orEmpty()
+                libraries.summary = if (signedIn) libraries.entry ?: allLibraries else text("登录后可选", "Available after sign-in")
+                logout.isVisible = signedIn
+                certificate.summary = when {
+                    setting(CA).isNotBlank() && setting(FINGERPRINT).isNotBlank() -> text("私有 CA", "Private CA")
+                    setting(CA).isNotBlank() || setting(FINGERPRINT).isNotBlank() -> text("需要补全私有 CA 和指纹", "Complete the private CA and fingerprint")
+                    else -> text("使用系统信任，可配置私有 CA", "System trust · Optional private CA")
+                }
+                diagnostic.summary = when (val code = setting(DIAGNOSTIC_CODE)) {
+                    "" -> text("尚未测试或登录", "No connection result yet")
+                    "OK" -> text("最近一次连接成功", "Last connection succeeded")
+                    else -> code
+                }
+                listOf(server, account, certificate, logout).forEach { it.setEnabled(!busy) }
+                login.setEnabled(!busy && setting(SERVER).isNotBlank() && setting(USERNAME).isNotBlank())
+                libraries.setEnabled(!busy && signedIn && known.isNotEmpty())
+                test.setEnabled(!busy && setting(SERVER).isNotBlank())
+            }
+
+            val updateScreen = Runnable { refresh() }
+            refreshSettings = WeakReference(updateScreen)
+
+            fun connect(password: String? = null) {
+                if (!connectionActionInProgress.compareAndSet(false, true)) return
+                val selected = config()
+                val username = setting(USERNAME)
+                updateScreen.run()
+                scope.launch {
+                    var stage = LoginStage.CONFIGURATION
+                    var error: Exception? = null
+                    try {
+                        if (password != null && username.isBlank()) throw NasConfigurationException(ConfigurationIssue.USERNAME_EMPTY)
+                        var token = ""
+                        val proposed = NasConnection(selected.server, selected.ca, selected.fingerprint) { token }
+                        try {
+                            stage = LoginStage.HTTPS
+                            checkServer(proposed)
+                            if (password != null) {
+                                stage = LoginStage.AUTHENTICATION
+                                val result = authenticate(proposed, username, password)
+                                token = result.text("AccessToken")
+                                val uid = JellyfinJson.id(result.obj("User").text("Id"))
+                                stage = LoginStage.LIBRARIES
+                                val roots = responseJson(proposed.client.newCall(request(proposed.url("Users", uid, "Items"))).execute())
+                                val allowed = JellyfinJson.items(roots).filter { it.text("CollectionType") !in listOf("music", "photos", "books", "livetv") }
+                                saveLogin(selected, username, proposed.endpoint, token, uid, allowed)
+                            }
+                        } finally {
+                            proposed.client.connectionPool.evictAll()
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        error = failure
+                    } finally {
+                        withContext(Dispatchers.Main) {
+                            connectionActionInProgress.set(false)
+                            if (config() == selected && setting(USERNAME) == username) {
+                                val failed = error?.let { ConnectionDiagnostics.failure(stage, it, chinese) }
+                                val report = ConnectionDiagnostics.report(BuildConfig.VERSION_NAME, stage, selected.ca.isNotBlank(), selected.fingerprint.isNotBlank(), username.isNotBlank(), error, chinese)
+                                preferences.edit().putString(DIAGNOSTIC, report).putString(DIAGNOSTIC_CODE, failed?.code ?: "OK").apply()
+                                message(failed?.advice ?: if (password == null) text("连接成功", "Connection succeeded") else text("登录成功", "Signed in"))
+                            }
+                            refreshSettings?.get()?.run()
+                            if (refreshSettings?.get() !== updateScreen) updateScreen.run()
+                        }
+                    }
+                }
+            }
+
+            server.setOnPreferenceChangeListener { _, value ->
+                val entered = (value as String).trim()
+                try {
+                    val endpoint = if (entered.isBlank()) "" else NasConnection.parseEndpoint(entered).toString().trimEnd('/')
+                    val previous = runCatching { NasConnection.parseEndpoint(setting(SERVER)).toString().trimEnd('/') }.getOrDefault(setting(SERVER))
+                    if (endpoint != previous) changeConnection(SERVER to endpoint)
+                    updateScreen.run()
+                } catch (error: NasConfigurationException) {
+                    message(ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice)
+                }
+                false
+            }
+            account.setOnPreferenceChangeListener { _, value ->
+                changeConnection(USERNAME to (value as String).trim())
+                refresh()
+                false
+            }
+            libraries.setOnPreferenceChangeListener { _, value ->
+                preferences.edit().putString(LIBRARY, value as String).apply()
+                refresh()
+                false
+            }
+            login.setOnPreferenceClickListener {
+                val password = dialogField(context, text("密码", "Password"), InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+                password.isSaveEnabled = false
+                formDialog(context, text("登录 Jellyfin", "Sign in to Jellyfin"), listOf(password), text("登录", "Sign in")) {
+                    val entered = password.text.toString()
+                    if (entered.isEmpty() || '\n' in entered || '\r' in entered) {
+                        password.error = text("请输入密码，去掉复制时带入的换行", "Enter your password without line breaks")
+                        false
+                    } else {
+                        password.text.clear()
+                        connect(entered)
+                        true
+                    }
+                }
                 true
             }
-        }.also(category::addPreference)
-
-        val server = EditTextPreference(context).apply {
-            key = SERVER
-            title = text("服务器地址", "Server address")
-            dialogTitle = title
-            dialogMessage = text("输入 Jellyfin 的 HTTPS 地址，例如 https://media.example.org", "Enter the Jellyfin HTTPS address, such as https://media.example.org")
-            isPersistent = false
-            isIconSpaceReserved = false
-            setOnBindEditTextListener {
-                it.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-                it.imeOptions = it.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
-            }
-        }.also(connectionSettings::addPreference)
-        val account = EditTextPreference(context).apply {
-            key = USERNAME
-            title = text("Jellyfin 账号", "Jellyfin username")
-            dialogTitle = title
-            isPersistent = false
-            isIconSpaceReserved = false
-            setOnBindEditTextListener {
-                it.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                it.imeOptions = it.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
-            }
-        }.also(connectionSettings::addPreference)
-        val login = Preference(context).apply { isIconSpaceReserved = false }.also(connectionSettings::addPreference)
-        val libraries = ListPreference(context).apply {
-            key = LIBRARY
-            title = text("媒体库", "Media library")
-            dialogTitle = title
-            isPersistent = false
-            isIconSpaceReserved = false
-        }.also(connectionSettings::addPreference)
-        val logout = Preference(context).apply {
-            title = text("退出登录", "Sign out")
-            isIconSpaceReserved = false
-        }.also(connectionSettings::addPreference)
-
-        val certificate = Preference(context).apply {
-            title = text("服务器证书", "Server certificate")
-            isIconSpaceReserved = false
-        }.also(securitySettings::addPreference)
-        val test = Preference(context).apply {
-            title = text("测试连接", "Test connection")
-            summary = text("检查 HTTPS 和 Jellyfin 服务", "Check HTTPS and the Jellyfin server")
-            isIconSpaceReserved = false
-        }.also(securitySettings::addPreference)
-        val diagnostic = action(securitySettings, text("最近连接诊断", "Last connection report")) {
-            val report = setting(DIAGNOSTIC).takeIf { setting(DIAGNOSTIC_CODE).isNotBlank() }
-            showDiagnostic(context, text("最近连接诊断", "Last connection report"), report, text("尚未测试或登录", "Run a connection test or sign in first"), text("复制", "Copy"))
-        }
-
-        fun refresh() {
-            val busy = connectionActionInProgress.get()
-            val signedIn = signedIn()
-            val allLibraries = text("全部可访问的媒体库", "All accessible libraries")
-            val known = runCatching { JellyfinJson.items(JellyfinJson.parse(setting(LIBRARIES))) }.getOrDefault(emptyList())
-            server.text = setting(SERVER)
-            server.summary = setting(SERVER).ifBlank { text("填写 HTTPS 地址", "Enter an HTTPS address") }
-            account.text = setting(USERNAME)
-            account.summary = setting(USERNAME).ifBlank { text("填写普通播放账号", "Enter a playback account") }
-            login.title = if (signedIn) text("重新登录", "Sign in again") else text("登录", "Sign in")
-            login.summary = if (busy) {
-                text("正在连接…", "Connecting…")
-            } else if (signedIn) {
-                text("已登录", "Signed in")
-            } else {
-                text("输入 Jellyfin 密码", "Enter your Jellyfin password")
-            }
-            libraries.entries = (listOf(allLibraries) + known.map { it.text("Name") }).toTypedArray()
-            libraries.entryValues = (listOf("") + known.map { it.text("Id") }).toTypedArray()
-            libraries.value = setting(LIBRARY).takeIf { it in libraries.entryValues }.orEmpty()
-            libraries.summary = if (signedIn) libraries.entry ?: allLibraries else text("登录后可选", "Available after sign-in")
-            logout.isVisible = signedIn
-            certificate.summary = when {
-                setting(CA).isNotBlank() && setting(FINGERPRINT).isNotBlank() -> text("私有 CA", "Private CA")
-                setting(CA).isNotBlank() || setting(FINGERPRINT).isNotBlank() -> text("需要补全私有 CA 和指纹", "Complete the private CA and fingerprint")
-                else -> text("使用系统信任，可配置私有 CA", "System trust · Optional private CA")
-            }
-            diagnostic.summary = when (val code = setting(DIAGNOSTIC_CODE)) {
-                "" -> text("尚未测试或登录", "No connection result yet")
-                "OK" -> text("最近一次连接成功", "Last connection succeeded")
-                else -> code
-            }
-            listOf(server, account, certificate, logout).forEach { it.setEnabled(!busy) }
-            login.setEnabled(!busy && setting(SERVER).isNotBlank() && setting(USERNAME).isNotBlank())
-            libraries.setEnabled(!busy && signedIn && known.isNotEmpty())
-            test.setEnabled(!busy && setting(SERVER).isNotBlank())
-        }
-
-        val updateScreen = Runnable { refresh() }
-        refreshSettings = WeakReference(updateScreen)
-
-        fun connect(password: String? = null) {
-            if (!connectionActionInProgress.compareAndSet(false, true)) return
-            val selected = config()
-            val username = setting(USERNAME)
-            updateScreen.run()
-            scope.launch {
-                var stage = LoginStage.CONFIGURATION
-                var error: Exception? = null
-                try {
-                    if (password != null && username.isBlank()) throw NasConfigurationException(ConfigurationIssue.USERNAME_EMPTY)
-                    var token = ""
-                    val proposed = NasConnection(selected.server, selected.ca, selected.fingerprint) { token }
-                    try {
-                        stage = LoginStage.HTTPS
-                        checkServer(proposed)
-                        if (password != null) {
-                            stage = LoginStage.AUTHENTICATION
-                            val result = authenticate(proposed, username, password)
-                            token = result.text("AccessToken")
-                            val uid = JellyfinJson.id(result.obj("User").text("Id"))
-                            stage = LoginStage.LIBRARIES
-                            val roots = responseJson(proposed.client.newCall(request(proposed.url("Users", uid, "Items"))).execute())
-                            val allowed = JellyfinJson.items(roots).filter { it.text("CollectionType") !in listOf("music", "photos", "books", "livetv") }
-                            saveLogin(selected, username, proposed.endpoint, token, uid, allowed)
-                        }
-                    } finally {
-                        proposed.client.connectionPool.evictAll()
-                    }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    error = failure
-                } finally {
-                    withContext(Dispatchers.Main) {
-                        connectionActionInProgress.set(false)
-                        if (config() == selected && setting(USERNAME) == username) {
-                            val failed = error?.let { ConnectionDiagnostics.failure(stage, it, chinese) }
-                            val report = ConnectionDiagnostics.report(BuildConfig.VERSION_NAME, stage, selected.ca.isNotBlank(), selected.fingerprint.isNotBlank(), username.isNotBlank(), error, chinese)
-                            preferences.edit().putString(DIAGNOSTIC, report).putString(DIAGNOSTIC_CODE, failed?.code ?: "OK").apply()
-                            message(failed?.advice ?: if (password == null) text("连接成功", "Connection succeeded") else text("登录成功", "Signed in"))
-                        }
-                        refreshSettings?.get()?.run()
-                        if (refreshSettings?.get() !== updateScreen) updateScreen.run()
-                    }
+            certificate.setOnPreferenceClickListener {
+                val pem = dialogField(context, text("CA 公钥证书（PEM）", "CA certificate (PEM)"), InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE).apply {
+                    minLines = 4
+                    maxLines = 6
+                    setText(setting(CA))
                 }
-            }
-        }
-
-        server.setOnPreferenceChangeListener { _, value ->
-            val entered = (value as String).trim()
-            try {
-                val endpoint = if (entered.isBlank()) "" else NasConnection.parseEndpoint(entered).toString().trimEnd('/')
-                val previous = runCatching { NasConnection.parseEndpoint(setting(SERVER)).toString().trimEnd('/') }.getOrDefault(setting(SERVER))
-                if (endpoint != previous) changeConnection(SERVER to endpoint)
-                updateScreen.run()
-            } catch (error: NasConfigurationException) {
-                message(ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice)
-            }
-            false
-        }
-        account.setOnPreferenceChangeListener { _, value ->
-            changeConnection(USERNAME to (value as String).trim())
-            refresh()
-            false
-        }
-        libraries.setOnPreferenceChangeListener { _, value ->
-            preferences.edit().putString(LIBRARY, value as String).apply()
-            refresh()
-            false
-        }
-        login.setOnPreferenceClickListener {
-            val password = dialogField(context, text("密码", "Password"), InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
-            password.isSaveEnabled = false
-            formDialog(context, text("登录 Jellyfin", "Sign in to Jellyfin"), listOf(password), text("登录", "Sign in")) {
-                val entered = password.text.toString()
-                if (entered.isEmpty() || '\n' in entered || '\r' in entered) {
-                    password.error = text("请输入密码，去掉复制时带入的换行", "Enter your password without line breaks")
-                    false
-                } else {
-                    password.text.clear()
-                    connect(entered)
-                    true
+                val sha = dialogField(context, text("SHA-256 指纹", "SHA-256 fingerprint"), InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS).apply {
+                    setText(setting(FINGERPRINT))
                 }
-            }
-            true
-        }
-        certificate.setOnPreferenceClickListener {
-            val pem = dialogField(context, text("CA 公钥证书（PEM）", "CA certificate (PEM)"), InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE).apply {
-                minLines = 4
-                maxLines = 6
-                setText(setting(CA))
-            }
-            val sha = dialogField(context, text("SHA-256 指纹", "SHA-256 fingerprint"), InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS).apply {
-                setText(setting(FINGERPRINT))
-            }
-            val systemTrust = if (setting(CA).isNotBlank() || setting(FINGERPRINT).isNotBlank()) text("恢复系统信任", "Use system trust") else null
-            formDialog(context, text("私有 CA", "Private CA"), listOf(pem, sha), text("保存", "Save"), systemTrust, onNeutral = {
-                changeConnection(CA to "", FINGERPRINT to "")
-                refresh()
-            }) {
-                try {
-                    val certificate = NasConnection.normalizePem(pem.text.toString())
-                    val fingerprint = NasConnection.normalizeFingerprint(sha.text.toString())
-                    NasConnection.parseCa(certificate, fingerprint)
-                    val previousPem = runCatching { NasConnection.normalizePem(setting(CA)) }.getOrDefault(setting(CA))
-                    val previousSha = runCatching { NasConnection.normalizeFingerprint(setting(FINGERPRINT)) }.getOrDefault(setting(FINGERPRINT))
-                    if (certificate != previousPem || fingerprint != previousSha) changeConnection(CA to certificate, FINGERPRINT to fingerprint)
+                val systemTrust = if (setting(CA).isNotBlank() || setting(FINGERPRINT).isNotBlank()) text("恢复系统信任", "Use system trust") else null
+                formDialog(context, text("私有 CA", "Private CA"), listOf(pem, sha), text("保存", "Save"), systemTrust, onNeutral = {
+                    changeConnection(CA to "", FINGERPRINT to "")
                     refresh()
-                    true
-                } catch (error: Exception) {
-                    val failed = ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese)
-                    if (failed.code in listOf("CA_FINGERPRINT_FORMAT", "CA_FINGERPRINT_MISMATCH")) sha.error = failed.advice else pem.error = failed.advice
-                    false
+                }) {
+                    try {
+                        val certificate = NasConnection.normalizePem(pem.text.toString())
+                        val fingerprint = NasConnection.normalizeFingerprint(sha.text.toString())
+                        NasConnection.parseCa(certificate, fingerprint)
+                        val previousPem = runCatching { NasConnection.normalizePem(setting(CA)) }.getOrDefault(setting(CA))
+                        val previousSha = runCatching { NasConnection.normalizeFingerprint(setting(FINGERPRINT)) }.getOrDefault(setting(FINGERPRINT))
+                        if (certificate != previousPem || fingerprint != previousSha) changeConnection(CA to certificate, FINGERPRINT to fingerprint)
+                        refresh()
+                        true
+                    } catch (error: Exception) {
+                        val failed = ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese)
+                        if (failed.code in listOf("CA_FINGERPRINT_FORMAT", "CA_FINGERPRINT_MISMATCH")) sha.error = failed.advice else pem.error = failed.advice
+                        false
+                    }
+                }
+                true
+            }
+            test.setOnPreferenceClickListener {
+                connect()
+                true
+            }
+            logout.setOnPreferenceClickListener {
+                changeConnection()
+                refresh()
+                message(text("已退出本机登录", "Signed out on this device"))
+                true
+            }
+            refresh()
+        }
+
+        private fun dialogField(context: Context, label: String, type: Int) = EditText(context).apply {
+            hint = label
+            inputType = type
+            imeOptions = imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        }
+
+        private fun formDialog(context: Context, title: String, fields: List<EditText>, positive: String, neutral: String? = null, onNeutral: () -> Unit = {}, confirm: () -> Boolean) {
+            val padding = (24 * context.resources.displayMetrics.density).toInt()
+            val form = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(padding, padding / 2, padding, padding / 2)
+                fields.forEach { addView(it, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
+            }
+            val builder = AlertDialog.Builder(context)
+                .setTitle(title)
+                .setView(ScrollView(context).apply { addView(form) })
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(positive, null)
+            if (neutral != null) builder.setNeutralButton(neutral) { _, _ -> onNeutral() }
+            val dialog = builder.show()
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                if (confirm()) dialog.dismiss()
+            }
+        }
+
+        private fun showDiagnostic(context: Context, title: String, report: String?, empty: String, copy: String) {
+            val padding = (24 * context.resources.displayMetrics.density).toInt()
+            val body = TextView(context).apply {
+                text = report ?: empty
+                setTextIsSelectable(true)
+                setPadding(padding, padding / 2, padding, padding / 2)
+            }
+            val builder = AlertDialog.Builder(context)
+                .setTitle(title)
+                .setView(ScrollView(context).apply { addView(body) })
+                .setNegativeButton(android.R.string.ok, null)
+            if (report != null) {
+                builder.setPositiveButton(copy) { _, _ ->
+                    context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText(title, report))
                 }
             }
-            true
+            builder.show()
         }
-        test.setOnPreferenceClickListener {
-            connect()
-            true
-        }
-        logout.setOnPreferenceClickListener {
-            changeConnection()
-            refresh()
-            message(text("已退出本机登录", "Signed out on this device"))
-            true
-        }
-        refresh()
-    }
-
-    private fun dialogField(context: Context, label: String, type: Int) = EditText(context).apply {
-        hint = label
-        inputType = type
-        imeOptions = imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
-    }
-
-    private fun formDialog(context: Context, title: String, fields: List<EditText>, positive: String, neutral: String? = null, onNeutral: () -> Unit = {}, confirm: () -> Boolean) {
-        val padding = (24 * context.resources.displayMetrics.density).toInt()
-        val form = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(padding, padding / 2, padding, padding / 2)
-            fields.forEach { addView(it, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
-        }
-        val builder = AlertDialog.Builder(context)
-            .setTitle(title)
-            .setView(ScrollView(context).apply { addView(form) })
-            .setNegativeButton(android.R.string.cancel, null)
-            .setPositiveButton(positive, null)
-        if (neutral != null) builder.setNeutralButton(neutral) { _, _ -> onNeutral() }
-        val dialog = builder.show()
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            if (confirm()) dialog.dismiss()
-        }
-    }
-
-    private fun showDiagnostic(context: Context, title: String, report: String?, empty: String, copy: String) {
-        val padding = (24 * context.resources.displayMetrics.density).toInt()
-        val body = TextView(context).apply {
-            text = report ?: empty
-            setTextIsSelectable(true)
-            setPadding(padding, padding / 2, padding, padding / 2)
-        }
-        val builder = AlertDialog.Builder(context)
-            .setTitle(title)
-            .setView(ScrollView(context).apply { addView(body) })
-            .setNegativeButton(android.R.string.ok, null)
-        if (report != null) {
-            builder.setPositiveButton(copy) { _, _ ->
-                context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText(title, report))
-            }
-        }
-        builder.show()
     }
 
     companion object {
