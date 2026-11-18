@@ -16,9 +16,9 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 
 ## 扩展列表
 
-### Jellyfin Xun — `src/all/jellyfinxun`（v3，APK 14.3）
+### Jellyfin Xun — `src/all/jellyfinxun`（v4，APK 14.4）
 
-独立 NAS 来源：通过 HTTPS 和当前服务器专属的 CA/指纹验证连接 Jellyfin，普通播放账户即可浏览、搜索及原画播放。视频使用受限的本机回环流接口交给播放器，不需要修改 Anikku 的全局证书设置。配置、限制与测试见 [使用说明](src/all/jellyfinxun/README.md)。
+通过 HTTPS 连接自己的 Jellyfin。用普通播放账号浏览、搜索和原画播放，支持系统信任的证书和私有 CA。设置界面支持中文和英文。配置、限制与测试见 [使用说明](src/all/jellyfinxun/README.md)。
 
 
 ### XNXX Xun — `src/all/xnxxxun`（v1，APK 14.1）

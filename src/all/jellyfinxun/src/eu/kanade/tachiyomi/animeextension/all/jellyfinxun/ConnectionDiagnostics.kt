@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.animeextension.all.jellyfinxun
 
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.EOFException
 import java.io.IOException
 import java.net.ConnectException
@@ -17,103 +16,119 @@ import java.util.IdentityHashMap
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLPeerUnverifiedException
 
-internal enum class LoginStage(val label: String) {
-    CONFIGURATION("本地配置与 CA 指纹"),
-    HTTPS("HTTPS 连接与服务器识别"),
-    AUTHENTICATION("播放账户认证"),
-    LIBRARIES("媒体库读取"),
+internal enum class LoginStage(val zh: String, val en: String) {
+    CONFIGURATION("连接设置", "Connection settings"),
+    HTTPS("HTTPS 和服务器", "HTTPS and server"),
+    AUTHENTICATION("账号认证", "Account authentication"),
+    LIBRARIES("媒体库读取", "Media library access"),
 }
 
-internal enum class ConfigurationIssue(val advice: String) {
-    URL_FORMAT("服务器地址必须是 https://主机:端口"),
-    URL_SENSITIVE("服务器地址不能带账号、密码、查询参数或页面片段"),
-    CA_PAIR("私有 CA 公钥证书与 SHA-256 指纹需要同时填写"),
-    CA_PEM_FORMAT("CA 公钥证书无法读取，请重新复制完整 BEGIN CERTIFICATE 到 END CERTIFICATE"),
-    CA_FINGERPRINT_FORMAT("CA 指纹必须包含完整的 64 个十六进制数字"),
-    CA_NOT_CA("导入的不是 CA 公钥证书"),
-    CA_USAGE("CA 证书不能用于验证服务器签名"),
-    CA_FINGERPRINT_MISMATCH("CA 证书与指纹不匹配，请分别从 NAS 可信文件重新复制"),
-    USERNAME_EMPTY("请先填写播放账户，例如 watcher"),
+internal enum class ConfigurationIssue(val advice: String, val englishAdvice: String) {
+    URL_FORMAT("请输入有效的 HTTPS 地址", "Enter a valid HTTPS address."),
+    URL_SENSITIVE("请从地址中移除账号、密码、查询参数和页面片段", "Remove credentials, query parameters and fragments from the address."),
+    CA_PAIR("请同时填写 CA 公钥证书和 SHA-256 指纹", "Enter both the CA certificate and its SHA-256 fingerprint."),
+    CA_PEM_FORMAT("请粘贴完整的 PEM 格式 CA 公钥证书", "Paste the complete CA certificate in PEM format."),
+    CA_FINGERPRINT_FORMAT("请输入完整的 64 位十六进制指纹", "Enter all 64 hexadecimal digits of the fingerprint."),
+    CA_NOT_CA("请使用签发服务器证书的 CA 公钥证书", "Use the CA certificate that issued the server certificate."),
+    CA_USAGE("这张 CA 证书无法验证服务器签名", "This CA certificate cannot verify the server signature."),
+    CA_FINGERPRINT_MISMATCH("证书与指纹不匹配，请核对服务器管理员提供的两项信息", "The fingerprint does not match the CA certificate. Verify both with your server administrator."),
+    USERNAME_EMPTY("请填写 Jellyfin 播放账号", "Enter your Jellyfin playback username."),
 }
 
 internal class NasConfigurationException(val issue: ConfigurationIssue) : IllegalArgumentException(issue.advice)
-internal class NasHttpException(val status: Int) : IOException("NAS 请求返回 HTTP $status")
+internal class NasHttpException(val status: Int) : IOException("Jellyfin HTTP $status")
 
-/** Diagnostics never render exception messages, response bodies, credentials or URLs with user info. */
+/** Shareable reports include only configuration flags and classified errors. */
 internal object ConnectionDiagnostics {
     data class Failure(val code: String, val advice: String)
 
-    fun failure(stage: LoginStage, error: Throwable): Failure {
+    fun failure(stage: LoginStage, error: Throwable, chinese: Boolean = true): Failure {
+        fun result(code: String, zh: String, en: String) = Failure(code, if (chinese) zh else en)
         val seen = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
         val causes = generateSequence(error) { it.cause }.takeWhile(seen::add).take(12).toList()
-        causes.filterIsInstance<NasConfigurationException>().firstOrNull()?.let { return Failure(it.issue.name, it.issue.advice) }
+        causes.filterIsInstance<NasConfigurationException>().firstOrNull()?.let {
+            return result(it.issue.name, it.issue.advice, it.issue.englishAdvice)
+        }
         causes.filterIsInstance<NasHttpException>().firstOrNull()?.let {
-            val advice = when (it.status) {
-                401 -> "账户或密码未通过认证，请核对 watcher 的密码"
-                403 -> if (stage == LoginStage.AUTHENTICATION) "服务器拒绝此账户登录，请检查是否误用了管理员账户或账户被停用" else "登录已通过，但服务器不允许读取这部分内容"
-                404 -> "接口不存在，请检查服务器地址；通常只填 https://IP:端口，不带 /web 页面地址"
-                else -> "服务器返回 HTTP ${it.status}，请保留此状态码排查"
+            val code = "HTTP_${it.status}"
+            return when (it.status) {
+                401 -> result(code, "请核对 Jellyfin 账号和密码", "Check your Jellyfin username and password.")
+                403 -> if (stage == LoginStage.AUTHENTICATION) {
+                    result(code, "请确认这个账号已启用且有播放权限", "Check that the account is enabled and has playback permission.")
+                } else {
+                    result(code, "请确认这个账号有权访问媒体库", "Check that the account has media library access.")
+                }
+                404 -> result(code, "请检查服务器地址，移除 /web 等网页路径", "Check the server address and remove page paths such as /web.")
+                else -> result(code, "服务器返回 HTTP ${it.status}", "The server returned HTTP ${it.status}.")
             }
-            return Failure("HTTP_${it.status}", advice)
         }
         return when {
-            causes.any { it is CertificateExpiredException || it is CertificateNotYetValidException } -> Failure("CERTIFICATE_TIME", "证书不在有效期内，请核对手机日期时间和证书有效期")
-            causes.any { it is SSLPeerUnverifiedException } -> Failure("TLS_IDENTITY", "服务器证书与当前 IP 或主机名不匹配，请核对地址和服务器证书")
-            causes.any { it is CertificateException || it is CertPathValidatorException } -> Failure("TLS_CERTIFICATE", "服务器证书链验证失败，请核对 CA、指纹及手机时间")
-            causes.any { it is SSLException } -> tlsFailure(causes)
-            causes.any { it is SocketTimeoutException } -> Failure("NETWORK_TIMEOUT", "连接或读取超时；家里先测试 NAS 内网 HTTPS 地址，外网再检查端口转发")
-            causes.any { it is NoRouteToHostException } -> Failure("NETWORK_UNREACHABLE", "手机当前网络无法到达这个地址，请检查 Wi-Fi 隔离或 VPN 分流")
-            causes.any { it is ConnectException } -> Failure("NETWORK_REFUSED", "连接未建立；请检查 IP、端口、Wi-Fi 隔离或端口转发")
-            causes.any { it is UnknownHostException } -> Failure("DNS_LOOKUP", "地址解析失败，请检查服务器地址或 DNS")
-            error is IllegalStateException && error.message == "请改用普通播放账户" -> Failure("ADMIN_ACCOUNT", "请使用 watcher 等普通播放账户")
-            error is IllegalStateException && error.message == "配置已变化，请重新登录" -> Failure("CONFIGURATION_CHANGED", "连接过程中设置发生变化，请重新登录")
-            error is IllegalStateException && error.message == "目标不是已初始化的 Jellyfin HTTPS 服务" -> Failure("NOT_JELLYFIN", "该地址没有返回已初始化的 Jellyfin 服务，请检查地址与端口")
-            error is IOException && error.message == "NAS 返回格式不正确" -> Failure("RESPONSE_FORMAT", "接口没有返回预期 JSON，请检查服务器地址是否带了网页路径")
-            error is IllegalStateException && error.message == "NAS 未返回会话" -> Failure("SESSION_MISSING", "登录响应没有返回会话，请复制最近连接诊断排查接口兼容性")
-            else -> Failure("UNEXPECTED_${error.javaClass.simpleName}", "请复制最近连接诊断；诊断不会包含密码、会话或服务器响应正文")
+            causes.any { it is CertificateExpiredException || it is CertificateNotYetValidException } ->
+                result("CERTIFICATE_TIME", "请核对手机时间和证书有效期", "Check your phone's clock and the certificate validity dates.")
+            causes.any { it is SSLPeerUnverifiedException } ->
+                result("TLS_IDENTITY", "请核对地址与证书上的域名或 IP", "Check that the address matches a host or IP on the certificate.")
+            causes.any { it is CertificateException || it is CertPathValidatorException } ->
+                result("TLS_CERTIFICATE", "证书链验证失败，请检查服务器证书与 CA", "Certificate verification failed. Check the server certificate and CA.")
+            causes.any { it is SSLException } -> tlsFailure(causes, chinese)
+            causes.any { it is SocketTimeoutException } ->
+                result("NETWORK_TIMEOUT", "连接超时，请检查当前网络与服务器端口", "Connection timed out. Check the network and the server port.")
+            causes.any { it is NoRouteToHostException } ->
+                result("NETWORK_UNREACHABLE", "当前网络无法访问服务器，请检查 Wi-Fi 或 VPN 分流", "The server is unreachable. Check Wi-Fi and VPN routing.")
+            causes.any { it is ConnectException } ->
+                result("NETWORK_REFUSED", "连接未建立，请检查地址、端口和服务器状态", "Could not connect. Check the address, port and server status.")
+            causes.any { it is UnknownHostException } ->
+                result("DNS_LOOKUP", "地址解析失败，请检查服务器地址或 DNS", "Could not resolve the server address. Check the hostname and DNS.")
+            error is IllegalStateException && error.message == "请改用普通播放账户" ->
+                result("ADMIN_ACCOUNT", "请使用普通播放账号", "Sign in with a playback account.")
+            error is IllegalStateException && error.message == "配置已变化，请重新登录" ->
+                result("CONFIGURATION_CHANGED", "连接设置已更改，请重新登录", "Connection settings changed. Sign in again.")
+            error is IllegalStateException && error.message == "目标不是已初始化的 Jellyfin HTTPS 服务" ->
+                result("NOT_JELLYFIN", "无法识别 Jellyfin 服务，请检查地址和端口", "Could not identify the Jellyfin server. Check the address and port.")
+            error is IOException && error.message == "NAS 返回格式不正确" ->
+                result("RESPONSE_FORMAT", "服务器响应格式有误，请检查地址", "Unexpected server response. Check the server address.")
+            error is IllegalStateException && error.message == "NAS 未返回会话" ->
+                result("SESSION_MISSING", "登录响应缺少会话信息，请查看最近连接诊断", "The login response has no session. Open the connection report for details.")
+            else -> result("UNEXPECTED_${error.javaClass.simpleName}", "请查看最近连接诊断", "Open the last connection report for details.")
         }
     }
 
-    private fun tlsFailure(causes: List<Throwable>): Failure {
-        // Match known TLS symptoms without displaying provider messages, which may include input.
+    private fun tlsFailure(causes: List<Throwable>, chinese: Boolean): Failure {
+        fun result(code: String, zh: String, en: String) = Failure(code, if (chinese) zh else en)
         val messages = causes.mapNotNull { it.message?.lowercase() }
         fun mentions(vararg terms: String) = messages.any { message -> terms.any(message::contains) }
         return when {
             mentions("trust anchor", "unknown ca", "unknown_ca", "certificate verify failed") ->
-                Failure("TLS_CERTIFICATE", "服务器证书链验证失败，请核对 CA、指纹及手机时间")
+                result("TLS_CERTIFICATE", "证书链验证失败，请检查服务器证书与 CA", "Certificate verification failed. Check the server certificate and CA.")
             mentions("wrong version number", "unrecognized ssl message", "unexpected record type", "not an ssl/tls record") ->
-                Failure("TLS_NOT_HTTPS", "当前连接返回的内容无法作为 HTTPS 解析，请检查地址、端口或网络代理")
+                result("TLS_NOT_HTTPS", "当前端口未返回有效的 HTTPS，请检查地址或代理", "The port did not return valid HTTPS. Check the address and proxy.")
             mentions("protocol_version", "protocol version", "no_application_protocol") ->
-                Failure("TLS_PROTOCOL", "客户端和服务器未能协商 HTTPS 协议，请复制诊断供排查")
+                result("TLS_PROTOCOL", "无法协商 HTTPS 协议，请查看最近连接诊断", "Could not negotiate HTTPS. Open the connection report for details.")
             causes.any { it is EOFException || (it is SocketException && it !is ConnectException) } ||
                 mentions("closed by peer", "remote host terminated", "connection reset", "unexpected eof", "end of stream") ->
-                Failure("TLS_INTERRUPTED", "HTTPS 握手时连接中断，请检查手机网络、VPN 或代理分流")
-            else -> Failure("TLS_HANDSHAKE", "HTTPS 握手失败，请复制最近连接诊断供排查")
+                result("TLS_INTERRUPTED", "HTTPS 连接中断，请检查手机网络、VPN 或代理", "HTTPS was interrupted. Check your network, VPN and proxy.")
+            else -> result("TLS_HANDSHAKE", "HTTPS 握手失败，请查看最近连接诊断", "The HTTPS handshake failed. Open the connection report for details.")
         }
     }
 
-    fun safeTarget(server: String): String {
-        val url = server.trim().toHttpUrlOrNull() ?: return "地址格式不正确"
-        if (url.username.isNotEmpty() || url.password.isNotEmpty()) return "含账号信息的地址已隐藏"
-        val host = if (':' in url.host) "[${url.host}]" else url.host
-        return "${url.scheme}://$host:${url.port}"
-    }
-
-    fun report(version: String, stage: LoginStage, server: String, caPresent: Boolean, fingerprintPresent: Boolean, usernamePresent: Boolean, error: Throwable? = null, success: Boolean = false): String = buildString {
-        append("Jellyfin Xun $version\n")
-        append("阶段：${stage.label}\n")
-        append("目标：${safeTarget(server)}\n")
-        append("连接方式：${if (caPresent) "NAS 直连" else "沿用系统代理设置"}\n")
-        append("CA：${if (caPresent) "已填写" else "未填写（使用系统信任）"}\n")
-        append("CA 指纹：${if (fingerprintPresent) "已填写" else "未填写"}\n")
-        append("播放账户：${if (usernamePresent) "已填写" else "未填写"}\n")
-        when {
-            error != null -> {
-                val failed = failure(stage, error)
-                append("结果：${failed.code}\n${failed.advice}")
-            }
-            success -> append("结果：成功")
-            else -> append("结果：正在检查")
-        }
+    fun report(
+        version: String,
+        stage: LoginStage,
+        caPresent: Boolean,
+        fingerprintPresent: Boolean,
+        usernamePresent: Boolean,
+        error: Throwable? = null,
+        chinese: Boolean = true,
+    ): String = buildString {
+        fun text(zh: String, en: String) = if (chinese) zh else en
+        fun configured(value: Boolean) = if (value) text("已填写", "Set") else text("未填写", "Not set")
+        appendLine("Jellyfin Xun $version")
+        appendLine(text("阶段 · ${stage.zh}", "Stage · ${stage.en}"))
+        appendLine(text("连接 · ", "Connection · ") + if (caPresent) text("直连", "Direct") else text("系统代理设置", "System proxy settings"))
+        appendLine(text("私有 CA · ", "Private CA · ") + configured(caPresent))
+        appendLine(text("CA 指纹 · ", "CA fingerprint · ") + configured(fingerprintPresent))
+        appendLine(text("账号 · ", "Username · ") + configured(usernamePresent))
+        val failed = error?.let { failure(stage, it, chinese) }
+        append(text("结果 · ", "Result · "))
+        append(if (failed == null) text("成功", "Success") else "${failed.code}\n${failed.advice}")
     }
 }
