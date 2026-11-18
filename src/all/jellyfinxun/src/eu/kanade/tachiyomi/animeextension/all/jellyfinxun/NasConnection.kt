@@ -4,6 +4,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import java.io.IOException
+import java.net.Proxy
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
@@ -39,6 +40,9 @@ internal class NasConnection(
                 val manager = factory.trustManagers.filterIsInstance<X509TrustManager>().single()
                 val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf(manager), null) }
                 sslSocketFactory(ssl.socketFactory, manager)
+                // This connection trusts a specific NAS. Connect to that endpoint directly
+                // so a system HTTP proxy cannot intercept or reject its private TLS session.
+                proxy(Proxy.NO_PROXY)
             } else {
                 if (expectedFingerprint.isNotBlank()) throw NasConfigurationException(ConfigurationIssue.CA_PAIR)
             }

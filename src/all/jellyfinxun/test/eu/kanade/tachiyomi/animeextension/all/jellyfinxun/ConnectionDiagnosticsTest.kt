@@ -69,6 +69,18 @@ class ConnectionDiagnosticsTest {
     }
 
     @Test
+    fun tlsFailureCanIdentifyProtocolOrInterruptedConnectionWithoutExposingProviderText() {
+        val wrongEndpoint = SSLHandshakeException("wrong version number near synthetic-private-text")
+        val report = ConnectionDiagnostics.report("14.3", LoginStage.HTTPS, "https://nas.invalid", true, true, true, wrongEndpoint)
+        assertTrue(report.contains("TLS_NOT_HTTPS"))
+        assertTrue(report.contains("NAS 直连"))
+        assertFalse(report.contains("synthetic-private-text"))
+
+        val reset = SSLHandshakeException("Connection closed by peer")
+        assertEquals("TLS_INTERRUPTED", ConnectionDiagnostics.failure(LoginStage.HTTPS, reset).code)
+    }
+
+    @Test
     fun mediaLibraryPermissionFailureIsSeparateFromLoginAuthentication() {
         val login = ConnectionDiagnostics.report("14.2", LoginStage.AUTHENTICATION, "https://nas.invalid", true, true, true, NasHttpException(401))
         val library = ConnectionDiagnostics.report("14.2", LoginStage.LIBRARIES, "https://nas.invalid", true, true, true, NasHttpException(403))
