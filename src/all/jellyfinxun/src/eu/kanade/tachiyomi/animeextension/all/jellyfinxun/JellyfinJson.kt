@@ -13,6 +13,8 @@ import java.io.IOException
 internal object JellyfinJson {
     private val json = Json { ignoreUnknownKeys = true }
     private val idPattern = Regex("[A-Za-z0-9_-]{1,128}")
+    private val nonVideoCollections = setOf("books", "music", "photos", "livetv", "playlists")
+    private val playlistTypes = setOf("playlist", "playlistsfolder", "manualplaylistsfolder")
 
     fun parse(text: String): JsonObject = try {
         json.parseToJsonElement(text) as? JsonObject ?: throw IOException("NAS 返回格式不正确")
@@ -33,6 +35,12 @@ internal object JellyfinJson {
     }
 
     fun items(root: JsonObject): List<JsonObject> = root.array("Items").mapNotNull { it as? JsonObject }
+
+    fun videoLibraries(root: JsonObject): List<JsonObject> = items(root).filter { item ->
+        idPattern.matches(item.text("Id")) && item.text("Name").isNotBlank() &&
+            item.text("Type").lowercase() !in playlistTypes && item.text("CollectionType").lowercase() !in nonVideoCollections
+    }.distinctBy { it.text("Id") }
+
     fun pageHasMore(root: JsonObject, start: Int, count: Int): Boolean = start + count < root.int("TotalRecordCount")
 }
 

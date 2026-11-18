@@ -6,16 +6,16 @@
 
 1. 在 Anikku 扩展管理中安装并信任 **Jellyfin Xun**，打开来源设置。
 2. 在 **服务器地址** 填写 HTTPS 地址，例如 `https://media.example.org`。支持自定义端口、IP SAN 证书和路径前缀。
-3. 填写普通 Jellyfin 播放账号，点 **登录** 并输入密码。扩展保存当前服务器的登录会话。登录后，在 **媒体库** 选择单个库或全部可访问的库。
+3. 点 **Jellyfin 账号**，填入普通播放账号和密码。登录后，**媒体库** 会列出 Jellyfin 返回的可访问视频库。可以选择一个库或浏览全部。
 4. 打开来源开始播放。原画直传要求客户端支持视频的编码。
 
-扩展默认使用系统信任。如果你的服务器使用私有 CA，请在登录前打开 **服务器证书**，粘贴管理员提供的 CA 公钥证书 PEM 和 SHA-256 指纹。证书验证通过后才可保存。地址、账号和证书有实际变更时需要重新登录。
+扩展默认使用系统信任。如果服务器使用私有 CA，请在登录前打开 **服务器证书**，选择 **私有 CA**，填写管理员提供的 PEM 证书和 SHA-256 指纹后保存。修改正在使用的地址或证书时，设置会在确认后保存并退出本机登录。
 
 证书链、有效期、IP SAN/主机名及导入 CA 的 SHA-256 均按正常 TLS 规则校验。私有信任仅用于配置的 HTTPS 主机、端口和路径前缀，客户端不跟随重定向。更改连接设置会清空本机登录、媒体库选择和播放链接。
 
 封面由来源的 HTTPS 客户端取得。视频和可外部读取的文本字幕通过同一客户端连接 NAS，再从仅绑定 `127.0.0.1` 的随机端口以流方式交给播放器或下载器。播放器拿到的是随机、不可猜测的本机链接；没有 NAS 密码、会话或可控的上游 URL。Range、HEAD、Content-Length 和 Content-Range 被保留，不先缓存整段视频。
 
-本机链接在应用退出或清除连接后失效。已有下载队列若保存了旧本机链接，需要重新解析视频。**退出登录**会清除本机状态并关闭活动转发。可在 Jellyfin 管理页撤销服务器会话。
+本机链接在应用退出或清除连接后失效。已有下载队列若保存了旧本机链接，需要重新解析视频。点开已登录的 **Jellyfin 账号** 可以重新登录。选择 **退出登录** 并确认后，扩展会清除本机登录并关闭活动转发。可在 Jellyfin 管理页撤销服务器会话。
 
 ## 范围与待验证项
 
@@ -36,7 +36,7 @@
 
 ## Quick setup
 
-Open **Jellyfin Xun** source settings in Anikku. Enter your **Server address** (HTTPS) and **Jellyfin username**, then select **Sign in**. After sign-in, choose a library under **Media library**. For a private CA, open **Server certificate** and import the CA certificate and SHA-256 fingerprint before signing in.
+Open **Jellyfin Xun** source settings in Anikku. Enter your **Server address** (HTTPS), then open **Jellyfin account** to sign in with your username and password. After sign-in, choose a library under **Media library**. For a private CA, open **Server certificate**, select **Private CA**, and save the CA certificate and SHA-256 fingerprint before signing in.
 
 ## 验证
 
