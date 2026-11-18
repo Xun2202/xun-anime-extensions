@@ -1,8 +1,11 @@
 package eu.kanade.tachiyomi.animeextension.all.jellyfinxun
 
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import java.io.EOFException
 import java.io.IOException
 import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.security.cert.CertPathValidatorException
@@ -57,8 +60,9 @@ internal object ConnectionDiagnostics {
             causes.any { it is CertificateExpiredException || it is CertificateNotYetValidException } -> Failure("CERTIFICATE_TIME", "证书不在有效期内，请核对手机日期时间和证书有效期")
             causes.any { it is SSLPeerUnverifiedException } -> Failure("TLS_IDENTITY", "服务器证书与当前 IP 或主机名不匹配，请核对地址和服务器证书")
             causes.any { it is CertificateException || it is CertPathValidatorException } -> Failure("TLS_CERTIFICATE", "服务器证书链验证失败，请核对 CA、指纹及手机时间")
-            causes.any { it is SSLException } -> Failure("TLS_HANDSHAKE", "HTTPS 握手失败；请核对该端口提供的是 HTTPS，以及 CA 证书是否正确")
+            causes.any { it is SSLException } -> tlsFailure(causes)
             causes.any { it is SocketTimeoutException } -> Failure("NETWORK_TIMEOUT", "连接或读取超时；家里先测试 NAS 内网 HTTPS 地址，外网再检查端口转发")
+            causes.any { it is NoRouteToHostException } -> Failure("NETWORK_UNREACHABLE", "手机当前网络无法到达这个地址，请检查 Wi-Fi 隔离或 VPN 分流")
             causes.any { it is ConnectException } -> Failure("NETWORK_REFUSED", "连接未建立；请检查 IP、端口、Wi-Fi 隔离或端口转发")
             causes.any { it is UnknownHostException } -> Failure("DNS_LOOKUP", "地址解析失败，请检查服务器地址或 DNS")
             error is IllegalStateException && error.message == "请改用普通播放账户" -> Failure("ADMIN_ACCOUNT", "请使用 watcher 等普通播放账户")
@@ -67,6 +71,24 @@ internal object ConnectionDiagnostics {
             error is IOException && error.message == "NAS 返回格式不正确" -> Failure("RESPONSE_FORMAT", "接口没有返回预期 JSON，请检查服务器地址是否带了网页路径")
             error is IllegalStateException && error.message == "NAS 未返回会话" -> Failure("SESSION_MISSING", "登录响应没有返回会话，请复制最近连接诊断排查接口兼容性")
             else -> Failure("UNEXPECTED_${error.javaClass.simpleName}", "请复制最近连接诊断；诊断不会包含密码、会话或服务器响应正文")
+        }
+    }
+
+    private fun tlsFailure(causes: List<Throwable>): Failure {
+        // Match known TLS symptoms without displaying provider messages, which may include input.
+        val messages = causes.mapNotNull { it.message?.lowercase() }
+        fun mentions(vararg terms: String) = messages.any { message -> terms.any(message::contains) }
+        return when {
+            mentions("trust anchor", "unknown ca", "unknown_ca", "certificate verify failed") ->
+                Failure("TLS_CERTIFICATE", "服务器证书链验证失败，请核对 CA、指纹及手机时间")
+            mentions("wrong version number", "unrecognized ssl message", "unexpected record type", "not an ssl/tls record") ->
+                Failure("TLS_NOT_HTTPS", "当前连接返回的内容无法作为 HTTPS 解析，请检查地址、端口或网络代理")
+            mentions("protocol_version", "protocol version", "no_application_protocol") ->
+                Failure("TLS_PROTOCOL", "客户端和服务器未能协商 HTTPS 协议，请复制诊断供排查")
+            causes.any { it is EOFException || (it is SocketException && it !is ConnectException) } ||
+                mentions("closed by peer", "remote host terminated", "connection reset", "unexpected eof", "end of stream") ->
+                Failure("TLS_INTERRUPTED", "HTTPS 握手时连接中断，请检查手机网络、VPN 或代理分流")
+            else -> Failure("TLS_HANDSHAKE", "HTTPS 握手失败，请复制最近连接诊断供排查")
         }
     }
 
@@ -81,6 +103,7 @@ internal object ConnectionDiagnostics {
         append("Jellyfin Xun $version\n")
         append("阶段：${stage.label}\n")
         append("目标：${safeTarget(server)}\n")
+        append("连接方式：${if (caPresent) "NAS 直连" else "沿用系统代理设置"}\n")
         append("CA：${if (caPresent) "已填写" else "未填写（使用系统信任）"}\n")
         append("CA 指纹：${if (fingerprintPresent) "已填写" else "未填写"}\n")
         append("播放账户：${if (usernamePresent) "已填写" else "未填写"}\n")

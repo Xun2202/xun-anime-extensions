@@ -18,11 +18,44 @@ import org.junit.Test
 import java.io.Closeable
 import java.io.IOException
 import java.net.InetSocketAddress
-import java.net.Socket
+import java.net.Proxy
+import java.net.ProxySelector
+import java.net.SocketAddress
+import java.net.URI
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class NasHttpsTest {
+    @Test
+    fun privateNasUsesItsVerifiedConnectionWhenSystemSelectsAProxy() {
+        val original = ProxySelector.getDefault()
+        val selections = AtomicInteger()
+        val systemProxy = object : ProxySelector() {
+            override fun select(uri: URI): List<Proxy> {
+                if (uri.scheme != "https") return listOf(Proxy.NO_PROXY)
+                selections.incrementAndGet()
+                return listOf(Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", 1)))
+            }
+
+            override fun connectFailed(uri: URI, address: SocketAddress, error: IOException) = Unit
+        }
+        ProxySelector.setDefault(systemProxy)
+        try {
+            FakeNas().use { nas ->
+                val connection = nas.connection()
+                val request = Request.Builder().url(connection.url("System", "Info", "Public")).build()
+                connection.client.newCall(request).execute().use { response -> assertEquals(200, response.code) }
+                assertEquals(0, selections.get())
+                assertEquals("/System/Info/Public", nas.requests.single().path)
+                assertEquals(systemProxy, NasConnection(nas.url, "", "") { "" }.client.proxySelector)
+            }
+        } finally {
+            ProxySelector.setDefault(original)
+        }
+    }
+
     @Test
     fun checkedPrivateCaAuthenticatesOnlyTheConfiguredNasAndSupportsSeeking() {
         FakeNas().use { nas ->
@@ -141,9 +174,15 @@ class NasHttpsTest {
             val connection = nas.connection()
             val proxy = NasStreamProxy(connection.client, connection::sameOrigin)
             val local = proxy.streamUrl(connection.url("video"))
-            val port = local.substringAfter("127.0.0.1:").substringBefore('/').toInt()
+            val player = OkHttpClient.Builder()
+                .callTimeout(2, TimeUnit.SECONDS)
+                .proxy(Proxy.NO_PROXY)
+                .build()
+            val request = Request.Builder().url(local).build()
+            player.newCall(request).execute().use { assertEquals(200, it.code) }
             proxy.close()
-            expectIoFailure { Socket("127.0.0.1", port).close() }
+            expectIoFailure { player.newCall(request).execute().close() }
+            assertEquals(1, nas.requests.size)
         }
     }
 
