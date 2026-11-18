@@ -40,7 +40,7 @@ internal class NasConnection(
                 val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf(manager), null) }
                 sslSocketFactory(ssl.socketFactory, manager)
             } else {
-                require(expectedFingerprint.isBlank()) { "请同时填写 CA 公钥证书与 SHA-256 指纹" }
+                if (expectedFingerprint.isNotBlank()) throw NasConfigurationException(ConfigurationIssue.CA_PAIR)
             }
         }
         .addInterceptor { chain ->
@@ -74,28 +74,41 @@ internal class NasConnection(
 
         fun parseEndpoint(value: String): HttpUrl {
             val parsed = value.trim().toHttpUrlOrNull()
-            require(parsed != null && parsed.scheme == "https") { "服务器地址必须是 https://主机:端口" }
-            require(parsed.username.isEmpty() && parsed.password.isEmpty() && parsed.query == null && parsed.fragment == null) {
-                "服务器地址不能包含账号、密码、查询参数或片段"
-            }
+            if (parsed == null || parsed.scheme != "https") throw NasConfigurationException(ConfigurationIssue.URL_FORMAT)
+            if (parsed.username.isNotEmpty() || parsed.password.isNotEmpty() || parsed.query != null || parsed.fragment != null) throw NasConfigurationException(ConfigurationIssue.URL_SENSITIVE)
             return parsed.newBuilder().encodedPath(parsed.encodedPath.trimEnd('/') + "/").build()
         }
 
         fun parseCa(pem: String, expected: String): X509Certificate {
-            val normalized = expected.replace(":", "").replace(" ", "").lowercase()
-            require(normalized.matches(Regex("[0-9a-f]{64}"))) { "请填写从 NAS 可信文件取得的完整 SHA-256 指纹" }
+            val normalized = normalizeFingerprint(expected)
             val certificates = try {
-                CertificateFactory.getInstance("X.509").generateCertificates(pem.trim().byteInputStream())
+                CertificateFactory.getInstance("X.509").generateCertificates(normalizePem(pem).byteInputStream())
             } catch (_: Exception) {
-                throw IllegalArgumentException("无法读取 CA 公钥证书，请粘贴完整 PEM 内容")
+                throw NasConfigurationException(ConfigurationIssue.CA_PEM_FORMAT)
             }
-            require(certificates.size == 1) { "请只导入当前 NAS 的一个 CA 公钥证书" }
+            if (certificates.size != 1) throw NasConfigurationException(ConfigurationIssue.CA_PEM_FORMAT)
             val ca = certificates.single() as X509Certificate
             ca.checkValidity()
-            require(ca.basicConstraints >= 0) { "导入的不是 CA 公钥证书" }
-            require(ca.keyUsage?.getOrNull(5) != false) { "CA 证书不能用于验证签名" }
-            require(MessageDigest.isEqual(fingerprint(ca).toByteArray(), normalized.toByteArray())) { "CA 指纹不匹配，连接已停止" }
+            if (ca.basicConstraints < 0) throw NasConfigurationException(ConfigurationIssue.CA_NOT_CA)
+            if (ca.keyUsage?.getOrNull(5) == false) throw NasConfigurationException(ConfigurationIssue.CA_USAGE)
+            if (!MessageDigest.isEqual(fingerprint(ca).toByteArray(), normalized.toByteArray())) throw NasConfigurationException(ConfigurationIssue.CA_FINGERPRINT_MISMATCH)
             return ca
+        }
+
+        fun normalizeFingerprint(value: String): String {
+            val result = value.filterNot { it.isWhitespace() || it == ':' }.lowercase()
+            if (!result.matches(Regex("[0-9a-f]{64}"))) throw NasConfigurationException(ConfigurationIssue.CA_FINGERPRINT_FORMAT)
+            return result
+        }
+
+        fun normalizePem(value: String): String {
+            if (value.length > 16_384 || value.contains("PRIVATE KEY")) throw NasConfigurationException(ConfigurationIssue.CA_PEM_FORMAT)
+            val cleaned = value.trim { it.isWhitespace() || it == '\uFEFF' }
+            val match = Regex("-----BEGIN CERTIFICATE-----([\\s\\S]*?)-----END CERTIFICATE-----").matchEntire(cleaned)
+                ?: throw NasConfigurationException(ConfigurationIssue.CA_PEM_FORMAT)
+            val body = match.groupValues[1].filterNot(Char::isWhitespace)
+            if (!body.matches(Regex("[A-Za-z0-9+/]+={0,2}"))) throw NasConfigurationException(ConfigurationIssue.CA_PEM_FORMAT)
+            return "-----BEGIN CERTIFICATE-----\n" + body.chunked(64).joinToString("\n") + "\n-----END CERTIFICATE-----\n"
         }
 
         fun fingerprint(certificate: X509Certificate): String = MessageDigest.getInstance("SHA-256")

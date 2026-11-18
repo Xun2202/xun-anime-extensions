@@ -8,6 +8,7 @@ import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
+import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -35,7 +36,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -108,7 +108,7 @@ class JellyfinXun :
 
     private fun request(url: HttpUrl): Request = Request.Builder().url(url).header("Accept", "application/json").build()
     private fun responseJson(response: Response): JsonObject = response.use {
-        if (!it.isSuccessful) throw IOException("NAS 请求失败（HTTP ${it.code}），请检查连接、账户权限或重新登录")
+        if (!it.isSuccessful) throw NasHttpException(it.code)
         JellyfinJson.parse(it.body.string())
     }
 
@@ -224,14 +224,49 @@ class JellyfinXun :
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         val context = screen.context
         fun message(text: String) = main.post { Toast.makeText(context, text, Toast.LENGTH_LONG).show() }
+        val diagnostic = EditTextPreference(context).apply {
+            key = DIAGNOSTIC
+            title = "最近连接诊断（点开可复制）"
+            summary = setting(DIAGNOSTIC).ifBlank { "显示失败阶段与错误代码，不包含密码、会话或响应正文" }
+            setOnBindEditTextListener {
+                it.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                it.setSingleLine(false)
+                it.setText(setting(DIAGNOSTIC).ifBlank { "尚未执行连接检查" })
+                it.setTextIsSelectable(true)
+            }
+            setOnPreferenceChangeListener { _, _ -> false }
+        }.also(screen::addPreference)
+        fun status(stage: LoginStage, selected: Config, error: Throwable? = null, success: Boolean = false) {
+            val report = ConnectionDiagnostics.report(BuildConfig.VERSION_NAME, stage, selected.server, selected.ca.isNotBlank(), selected.fingerprint.isNotBlank(), setting(USERNAME).isNotBlank(), error, success)
+            preferences.edit().putString(DIAGNOSTIC, report).apply()
+            main.post {
+                diagnostic.summary = "${stage.label}：${if (error != null) {
+                    ConnectionDiagnostics.failure(stage, error).code
+                } else if (success) {
+                    "成功"
+                } else {
+                    "正在检查"
+                }}"
+                diagnostic.text = report
+            }
+        }
+        fun verifyServer(nas: NasConnection) {
+            val public = responseJson(nas.client.newCall(request(nas.url("System", "Info", "Public"))).execute())
+            check(public.text("Version").isNotBlank() && public.flag("StartupWizardCompleted")) { "目标不是已初始化的 Jellyfin HTTPS 服务" }
+        }
         fun edit(keyName: String, label: String, description: String, multiline: Boolean = false, validate: (String) -> Unit = {}) {
             EditTextPreference(context).apply {
                 key = keyName
                 title = label
-                summary = description
+                summary = if (keyName == SERVER && setting(keyName).isNotBlank()) ConnectionDiagnostics.safeTarget(setting(keyName)) else description
                 text = setting(keyName)
                 setOnBindEditTextListener { field ->
                     field.inputType = InputType.TYPE_CLASS_TEXT or if (multiline) InputType.TYPE_TEXT_FLAG_MULTI_LINE else InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    if (multiline) {
+                        field.setSingleLine(false)
+                        field.minLines = 4
+                        field.maxLines = 8
+                    }
                 }
                 setOnPreferenceChangeListener { _, value ->
                     val entered = (value as String).trim()
@@ -239,9 +274,10 @@ class JellyfinXun :
                         if (entered.isNotEmpty()) validate(entered)
                         preferences.edit().putString(keyName, entered).apply()
                         clearSession()
+                        if (keyName == SERVER) summary = ConnectionDiagnostics.safeTarget(entered)
                         true
-                    } catch (_: Exception) {
-                        message("配置格式不正确，请检查 HTTPS 地址、PEM 证书或完整 SHA-256 指纹")
+                    } catch (error: Exception) {
+                        message(ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error).advice)
                         false
                     }
                 }
@@ -249,10 +285,10 @@ class JellyfinXun :
         }
         edit(SERVER, "NAS HTTPS 地址", "例如 https://公网IP:48273；也可填写同一 NAS 的内网 HTTPS 地址", validate = { NasConnection.parseEndpoint(it) })
         edit(CA, "当前 NAS 的 CA 公钥证书（PEM）", "从 NAS 可信文件粘贴完整 BEGIN CERTIFICATE 到 END CERTIFICATE；公有 CA 可留空", multiline = true, validate = {
-            require(it.length < 16_384 && it.startsWith("-----BEGIN CERTIFICATE-----") && it.endsWith("-----END CERTIFICATE-----") && !it.contains("PRIVATE KEY"))
+            NasConnection.normalizePem(it)
         })
         edit(FINGERPRINT, "CA 证书 SHA-256 指纹", "从 NAS 的 SHA256.txt 独立核对；支持带冒号格式", validate = {
-            require(it.replace(":", "").replace(" ", "").matches(Regex("[0-9a-fA-F]{64}")))
+            NasConnection.normalizeFingerprint(it)
         })
         edit(USERNAME, "播放账户", "使用 NAS 的普通播放账户，例如 watcher")
         val libraries = ListPreference(context).apply {
@@ -263,6 +299,34 @@ class JellyfinXun :
             entries = (listOf("全部可访问的媒体库") + known.map { it.text("Name") }).toTypedArray()
             entryValues = (listOf("") + known.map { it.text("Id") }).toTypedArray()
             value = setting(LIBRARY)
+        }.also(screen::addPreference)
+        SwitchPreferenceCompat(context).apply {
+            key = "nas_check_connection_action"
+            title = "只检查连接与证书"
+            summary = "不需要密码；先确认配置、HTTPS 和 Jellyfin 服务可用"
+            setDefaultValue(false)
+            setOnPreferenceChangeListener { field, _ ->
+                field.setEnabled(false)
+                val selected = config()
+                scope.launch {
+                    var stage = LoginStage.CONFIGURATION
+                    try {
+                        status(stage, selected)
+                        val nas = current()
+                        stage = LoginStage.HTTPS
+                        status(stage, selected)
+                        verifyServer(nas)
+                        status(stage, selected, success = true)
+                        message("HTTPS 与证书检查成功，尚未尝试账户登录")
+                    } catch (error: Exception) {
+                        status(stage, selected, error)
+                        message("检查失败：${ConnectionDiagnostics.failure(stage, error).code}。点开最近连接诊断查看详情")
+                    } finally {
+                        main.post { field.setEnabled(true) }
+                    }
+                }
+                false
+            }
         }.also(screen::addPreference)
         EditTextPreference(context).apply {
             key = "login_password_in_memory"
@@ -275,13 +339,25 @@ class JellyfinXun :
                     message("请先填写本次登录密码")
                     return@setOnPreferenceChangeListener false
                 }
+                if ('\n' in pw || '\r' in pw) {
+                    message("密码里有换行，请只复制密码本身后重试")
+                    return@setOnPreferenceChangeListener false
+                }
                 passwordField.setEnabled(false)
+                val selected = config()
                 scope.launch {
+                    var stage = LoginStage.CONFIGURATION
                     try {
-                        val selected = config()
+                        status(stage, selected)
                         val nas = current()
+                        if (setting(USERNAME).isBlank()) throw NasConfigurationException(ConfigurationIssue.USERNAME_EMPTY)
+                        stage = LoginStage.HTTPS
+                        status(stage, selected)
+                        verifyServer(nas)
+                        stage = LoginStage.AUTHENTICATION
+                        status(stage, selected)
                         val body = buildJsonObject {
-                            put("Username", setting(USERNAME))
+                            put("Username", setting(USERNAME).trim())
                             put("Pw", pw)
                         }.toString().toRequestBody(JSON_TYPE)
                         val result = responseJson(nas.client.newCall(Request.Builder().url(nas.url("Users", "AuthenticateByName")).post(body).build()).execute())
@@ -291,17 +367,21 @@ class JellyfinXun :
                         val uid = JellyfinJson.id(result.obj("User").text("Id"))
                         check(session.isNotEmpty()) { "NAS 未返回会话" }
                         preferences.edit().putString(TOKEN, session).putString(USER_ID, uid).putString(SESSION_ORIGIN, nas.endpoint.toString()).apply()
+                        stage = LoginStage.LIBRARIES
+                        status(stage, selected)
                         val roots = getJson(nas.url("Users", uid, "Items"))
                         val allowed = JellyfinJson.items(roots).filter { it.text("CollectionType") !in listOf("music", "photos", "books", "livetv") }
                         preferences.edit().putString(LIBRARIES, buildJsonObject { put("Items", JsonArray(allowed)) }.toString()).apply()
+                        status(stage, selected, success = true)
                         main.post {
                             libraries.entries = (listOf("全部可访问的媒体库") + allowed.map { it.text("Name") }).toTypedArray()
                             libraries.entryValues = (listOf("") + allowed.map { it.text("Id") }).toTypedArray()
                             Toast.makeText(context, "证书验证与登录成功", Toast.LENGTH_LONG).show()
                         }
-                    } catch (_: Exception) {
+                    } catch (error: Exception) {
                         clearSession()
-                        message("登录失败：请核对 HTTPS 地址、CA 证书与指纹、普通播放账户及网络。未跳过证书校验。")
+                        status(stage, selected, error)
+                        message("登录失败：${ConnectionDiagnostics.failure(stage, error).code}。点开最近连接诊断查看详情")
                     } finally {
                         main.post { passwordField.setEnabled(true) }
                     }
@@ -334,6 +414,7 @@ class JellyfinXun :
         private const val SESSION_ORIGIN = "nas_session_origin"
         private const val LIBRARIES = "nas_libraries"
         private const val LIBRARY = "nas_library"
+        private const val DIAGNOSTIC = "nas_connection_diagnostic"
         private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
