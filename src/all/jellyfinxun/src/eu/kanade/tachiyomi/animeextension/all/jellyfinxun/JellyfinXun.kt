@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.all.jellyfinxun
 
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.DialogInterface
@@ -10,6 +11,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RadioButton
@@ -17,6 +19,8 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.widget.doAfterTextChanged
+import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
@@ -54,6 +58,7 @@ import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import androidx.appcompat.app.AlertDialog as AppCompatAlertDialog
 
 class JellyfinXun :
     AnimeHttpLegacySource(),
@@ -294,11 +299,39 @@ class JellyfinXun :
         private val context = screen.context
         private val chinese = context.resources.configuration.locales[0].language == "zh"
 
-        // Host builds can remove unused AppCompat methods during optimization.
-        // Framework widgets stay available when this extension is loaded into a host app.
-        private val dialogContext by lazy { AlertDialog.Builder(context).context }
+        private val dialogContext by lazy {
+            try {
+                AppCompatAlertDialog.Builder(context).context
+            } catch (_: LinkageError) {
+                AlertDialog.Builder(context).context
+            }
+        }
 
-        private val server = row(text("服务器地址", "Server address"), ::editServer)
+        private val server = EditTextPreference(context).apply {
+            key = SERVER
+            title = text("服务器地址", "Server address")
+            dialogTitle = title
+            isPersistent = false
+            isIconSpaceReserved = false
+            setOnBindEditTextListener { address ->
+                address.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                address.hint = "https://media.example.org"
+                address.imeOptions = address.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                address.doAfterTextChanged { value ->
+                    address.error = try {
+                        normalizeAddress(value.toString())
+                        null
+                    } catch (error: NasConfigurationException) {
+                        ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice
+                    }
+                    address.rootView.findViewById<Button>(android.R.id.button1)?.isEnabled = address.error == null
+                }
+            }
+            setOnPreferenceChangeListener { _, value ->
+                editServer(value as String)
+                false
+            }
+        }
         private val certificate = row(text("服务器证书", "Server certificate"), ::editCertificate)
         private val account = row(text("Jellyfin 账号", "Jellyfin account"), ::openAccount)
         private val libraries = ListPreference(context).apply {
@@ -353,6 +386,7 @@ class JellyfinXun :
             val configured = selected.server.isNotBlank()
             val signedIn = signedIn()
             val username = setting(USERNAME)
+            server.text = selected.server
             server.summary = selected.server.ifBlank { text("填写 HTTPS 地址", "Enter an HTTPS address") }
             certificate.summary = when {
                 selected.ca.isNotBlank() && selected.fingerprint.isNotBlank() -> text("私有 CA", "Private CA")
@@ -389,28 +423,18 @@ class JellyfinXun :
             if (visible !== refreshAction) refresh()
         }
 
-        private fun editServer() {
-            val form = form()
-            val address = field(
-                form,
-                text("HTTPS 地址", "HTTPS address"),
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI,
-                setting(SERVER),
-                "https://media.example.org",
-            )
-            showForm(text("服务器地址", "Server address"), form, text("保存", "Save"), address) { dialog ->
-                try {
-                    val entered = address.text.toString().trim()
-                    val endpoint = if (entered.isBlank()) "" else NasConnection.parseEndpoint(entered).toString().trimEnd('/')
-                    val previous = runCatching { NasConnection.parseEndpoint(setting(SERVER)).toString().trimEnd('/') }.getOrDefault(setting(SERVER))
-                    if (endpoint == previous) {
-                        dialog.dismiss()
-                    } else {
-                        saveConnectionChanges(dialog, text("更改服务器地址？", "Change server address?"), SERVER to endpoint)
-                    }
-                } catch (error: NasConfigurationException) {
-                    address.error = ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice
+        private fun normalizeAddress(value: String): String = value.trim().takeIf(String::isNotEmpty)
+            ?.let { NasConnection.parseEndpoint(it).toString().trimEnd('/') }.orEmpty()
+
+        private fun editServer(value: String) {
+            try {
+                val endpoint = normalizeAddress(value)
+                val previous = runCatching { normalizeAddress(setting(SERVER)) }.getOrDefault(setting(SERVER))
+                if (endpoint != previous) {
+                    saveConnectionChanges(text("更改服务器地址？", "Change server address?"), SERVER to endpoint)
                 }
+            } catch (error: NasConfigurationException) {
+                message(ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice)
             }
         }
 
@@ -420,13 +444,13 @@ class JellyfinXun :
                 return
             }
             val actions = arrayOf(text("重新登录", "Sign in again"), text("退出登录", "Sign out"))
-            AlertDialog.Builder(context)
-                .setTitle(setting(USERNAME).ifBlank { text("Jellyfin 账号", "Jellyfin account") })
-                .setItems(actions) { _, which ->
+            settingsDialog(
+                title = setting(USERNAME).ifBlank { text("Jellyfin 账号", "Jellyfin account") },
+                choices = actions,
+                action = { _, which ->
                     if (which == 0) openLogin() else confirmSignOut()
-                }
-                .setNegativeButton(android.R.string.cancel, null)
-                .show()
+                },
+            ).show()
         }
 
         private fun confirmSignOut() {
@@ -457,7 +481,7 @@ class JellyfinXun :
                 form,
                 signInLabel,
                 if (username.text.isNullOrBlank()) username else password,
-            ) { dialog ->
+            ) { dialog, submit ->
                 val name = username.text.toString().trim()
                 val enteredPassword = password.text.toString()
                 if (name.isEmpty()) {
@@ -470,7 +494,6 @@ class JellyfinXun :
                     password.requestFocus()
                     return@showForm
                 }
-                val submit = dialog.getButton(DialogInterface.BUTTON_POSITIVE)
                 fun showProgress(busy: Boolean) {
                     username.isEnabled = !busy
                     password.isEnabled = !busy
@@ -539,7 +562,7 @@ class JellyfinXun :
                     custom.visibility = View.GONE
                 }
             }
-            showForm(text("服务器证书", "Server certificate"), form, text("保存", "Save")) { dialog ->
+            showForm(text("服务器证书", "Server certificate"), form, text("保存", "Save")) { dialog, _ ->
                 try {
                     val usePrivateCa = trustMode.checkedRadioButtonId == privateCa
                     val newPem = if (usePrivateCa) NasConnection.normalizePem(pem.text.toString()) else ""
@@ -550,7 +573,9 @@ class JellyfinXun :
                     if (newPem == previousPem && newFingerprint == previousFingerprint) {
                         dialog.dismiss()
                     } else {
-                        saveConnectionChanges(dialog, text("更改服务器证书？", "Change server certificate?"), CA to newPem, FINGERPRINT to newFingerprint)
+                        saveConnectionChanges(text("更改服务器证书？", "Change server certificate?"), CA to newPem, FINGERPRINT to newFingerprint) {
+                            dialog.dismiss()
+                        }
                     }
                 } catch (error: Exception) {
                     val failure = ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese)
@@ -561,10 +586,10 @@ class JellyfinXun :
             }
         }
 
-        private fun saveConnectionChanges(dialog: AlertDialog, title: String, vararg changes: Pair<String, String>) {
+        private fun saveConnectionChanges(title: String, vararg changes: Pair<String, String>, afterSave: () -> Unit = {}) {
             fun save() {
                 changeConnection(*changes)
-                dialog.dismiss()
+                afterSave()
                 refreshActiveScreen()
             }
             if (signedIn()) {
@@ -580,12 +605,7 @@ class JellyfinXun :
         }
 
         private fun confirm(title: String, detail: String, label: String, perform: () -> Unit) {
-            AlertDialog.Builder(context)
-                .setTitle(title)
-                .setMessage(detail)
-                .setNegativeButton(android.R.string.cancel, null)
-                .setPositiveButton(label) { _, _ -> perform() }
-                .show()
+            settingsDialog(title, detail = detail, positive = label, action = { _, _ -> perform() }).show()
         }
 
         private fun testConnection() {
@@ -703,19 +723,50 @@ class JellyfinXun :
             return input
         }
 
-        private fun showForm(title: String, form: LinearLayout, label: String, focus: EditText? = null, submit: (AlertDialog) -> Unit) {
-            val dialog = AlertDialog.Builder(context)
-                .setTitle(title)
-                .setView(ScrollView(dialogContext).apply { addView(form) })
-                .setNegativeButton(android.R.string.cancel, null)
-                .setPositiveButton(label, null)
-                .create()
+        private fun settingsDialog(
+            title: String,
+            detail: String? = null,
+            view: View? = null,
+            choices: Array<String>? = null,
+            positive: String? = null,
+            close: Int = android.R.string.cancel,
+            action: DialogInterface.OnClickListener? = null,
+        ): Dialog = try {
+            AppCompatAlertDialog.Builder(context).apply {
+                setTitle(title)
+                detail?.let { setMessage(it) }
+                view?.let { setView(it) }
+                choices?.let { setItems(it, action) }
+                positive?.let { setPositiveButton(it, action) }
+                setNegativeButton(close, null)
+            }.create()
+        } catch (_: LinkageError) {
+            AlertDialog.Builder(context).apply {
+                setTitle(title)
+                detail?.let { setMessage(it) }
+                view?.let { setView(it) }
+                choices?.let { setItems(it, action) }
+                positive?.let { setPositiveButton(it, action) }
+                setNegativeButton(close, null)
+            }.create()
+        }
+
+        private fun showForm(title: String, form: LinearLayout, label: String, focus: EditText? = null, submit: (Dialog, Button) -> Unit) {
+            val dialog = settingsDialog(title, view = ScrollView(dialogContext).apply { addView(form) }, positive = label)
             dialog.setCanceledOnTouchOutside(false)
             val keyboard = if (focus == null) WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN else WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE
             dialog.window?.setSoftInputMode(keyboard or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             dialog.setOnShowListener {
                 (focus ?: form).requestFocus()
-                dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener { submit(dialog) }
+                // Resolve the standard Preference dialog button through Android's Dialog API.
+                // The host optimizer can remove the AppCompat-specific button accessor.
+                val positive = dialog.findViewById<Button>(android.R.id.button1)
+                if (positive == null) {
+                    dialog.dismiss()
+                    message(text("无法显示这个表单", "Could not display this form"))
+                } else {
+                    positive.setOnClickListener { submit(dialog, positive) }
+                }
             }
             dialog.show()
         }
@@ -728,16 +779,15 @@ class JellyfinXun :
                 setTextIsSelectable(true)
                 setPadding(dp(24), dp(8), dp(24), dp(12))
             }
-            val builder = AlertDialog.Builder(context)
-                .setTitle(title)
-                .setView(ScrollView(dialogContext).apply { addView(body) })
-                .setNegativeButton(android.R.string.ok, null)
-            if (report != null) {
-                builder.setPositiveButton(text("复制", "Copy")) { _, _ ->
+            settingsDialog(
+                title = title,
+                view = ScrollView(dialogContext).apply { addView(body) },
+                positive = report?.let { text("复制", "Copy") },
+                close = android.R.string.ok,
+                action = { _, _ ->
                     context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText(title, report))
-                }
-            }
-            builder.show()
+                },
+            ).show()
         }
     }
 
