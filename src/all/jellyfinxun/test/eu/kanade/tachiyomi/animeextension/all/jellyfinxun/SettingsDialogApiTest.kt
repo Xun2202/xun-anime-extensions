@@ -6,12 +6,13 @@ import org.junit.Test
 
 class SettingsDialogApiTest {
     @Test
-    fun settingsUseAndroidDialogsAcrossTheHostBoundary() {
+    fun settingsUseTheFrameworkButtonLookupInTheHostDialog() {
         // The host's release optimizer can remove AppCompat methods used only by extensions.
         val settingsBytecode = checkNotNull(javaClass.getResourceAsStream("JellyfinXun\$Settings.class"))
             .use { it.readBytes().toString(Charsets.ISO_8859_1) }
 
-        assertTrue(settingsBytecode.contains("android/app/AlertDialog"))
-        assertFalse(settingsBytecode.contains("androidx/appcompat/"))
+        assertTrue(settingsBytecode.contains("android/app/Dialog"))
+        assertTrue(settingsBytecode.contains("findViewById"))
+        assertFalse(settingsBytecode.contains("getButton"))
     }
 }
