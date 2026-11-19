@@ -1,7 +1,7 @@
 ext {
     extName = 'Jellyfin Xun'
     extClass = '.JellyfinXun'
-    extVersionCode = 7
+    extVersionCode = 8
     isNsfw = false
 }
 

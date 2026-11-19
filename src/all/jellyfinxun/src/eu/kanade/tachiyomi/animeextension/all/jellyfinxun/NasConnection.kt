@@ -83,6 +83,16 @@ internal class NasConnection(
             return parsed.newBuilder().encodedPath(parsed.encodedPath.trimEnd('/') + "/").build()
         }
 
+        fun administrationPage(value: String): HttpUrl {
+            val endpoint = parseEndpoint(value)
+            val path = endpoint.encodedPath
+            return when {
+                path.endsWith("/web/") -> endpoint
+                path.endsWith("/web/index.html/") -> endpoint.newBuilder().encodedPath(path.removeSuffix("index.html/")).build()
+                else -> endpoint.newBuilder().addPathSegment("web").addPathSegment("").build()
+            }
+        }
+
         fun parseCa(pem: String, expected: String): X509Certificate {
             val normalized = normalizeFingerprint(expected)
             val certificates = try {
