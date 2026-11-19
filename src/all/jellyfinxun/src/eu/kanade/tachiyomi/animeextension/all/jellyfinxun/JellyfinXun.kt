@@ -2,9 +2,12 @@ package eu.kanade.tachiyomi.animeextension.all.jellyfinxun
 
 import android.app.AlertDialog
 import android.app.Dialog
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.DialogInterface
+import android.content.Intent
+import android.net.Uri
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -307,31 +310,7 @@ class JellyfinXun :
             }
         }
 
-        private val server = EditTextPreference(context).apply {
-            key = SERVER
-            title = text("服务器地址", "Server address")
-            dialogTitle = title
-            isPersistent = false
-            isIconSpaceReserved = false
-            setOnBindEditTextListener { address ->
-                address.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-                address.hint = "https://media.example.org"
-                address.imeOptions = address.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
-                address.doAfterTextChanged { value ->
-                    address.error = try {
-                        normalizeAddress(value.toString())
-                        null
-                    } catch (error: NasConfigurationException) {
-                        ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice
-                    }
-                    address.rootView.findViewById<Button>(android.R.id.button1)?.isEnabled = address.error == null
-                }
-            }
-            setOnPreferenceChangeListener { _, value ->
-                editServer(value as String)
-                false
-            }
-        }
+        private val server = addressPreference(SERVER, text("服务器地址", "Server address"), ::normalizeAddress, ::editServer)
         private val certificate = row(text("服务器证书", "Server certificate"), ::editCertificate)
         private val account = row(text("Jellyfin 账号", "Jellyfin account"), ::openAccount)
         private val libraries = ListPreference(context).apply {
@@ -346,6 +325,17 @@ class JellyfinXun :
                 false
             }
         }
+        private val management = row(text("管理后台", "Management dashboard"), ::openManagement)
+        private val managementAddress = addressPreference(
+            MANAGEMENT_ADDRESS,
+            text("后台地址", "Management address"),
+            { value -> if (value.isBlank()) "" else NasConnection.administrationPage(value).toString() },
+        ) { address ->
+            preferences.edit().putString(MANAGEMENT_ADDRESS, address).apply()
+            refreshActiveScreen()
+        }.apply {
+            dialogMessage = text("填写后台的 HTTPS 地址。留空使用服务器地址。", "Enter the management HTTPS address. Leave it empty to use the server address.")
+        }
         private val test = row(text("测试连接", "Test connection"), ::testConnection)
         private val diagnostic = row(text("最近连接诊断", "Last connection report"), ::showDiagnostic)
         private val refreshAction = Runnable(::refresh)
@@ -353,6 +343,7 @@ class JellyfinXun :
         fun build() {
             section(text("服务器", "Server"), server, certificate)
             section(text("账号与媒体库", "Account & media library"), account, libraries)
+            section(text("管理", "Administration"), management, managementAddress)
             section(text("诊断", "Diagnostics"), test, diagnostic)
             refreshSettings = WeakReference(refreshAction)
             refresh()
@@ -361,6 +352,36 @@ class JellyfinXun :
         private fun text(zh: String, en: String) = if (chinese) zh else en
         private fun dp(value: Int) = (value * context.resources.displayMetrics.density + 0.5f).toInt()
         private fun message(value: String) = Toast.makeText(context, value, Toast.LENGTH_LONG).show()
+
+        private fun addressPreference(settingKey: String, label: String, normalize: (String) -> String, save: (String) -> Unit) = EditTextPreference(context).apply {
+            key = settingKey
+            title = label
+            dialogTitle = label
+            isPersistent = false
+            isIconSpaceReserved = false
+            setOnBindEditTextListener { address ->
+                address.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                address.hint = "https://media.example.org"
+                address.imeOptions = address.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                address.doAfterTextChanged { value ->
+                    address.error = try {
+                        normalize(value.toString())
+                        null
+                    } catch (error: NasConfigurationException) {
+                        ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice
+                    }
+                    address.rootView.findViewById<Button>(android.R.id.button1)?.isEnabled = address.error == null
+                }
+            }
+            setOnPreferenceChangeListener { _, value ->
+                try {
+                    save(normalize(value as String))
+                } catch (error: NasConfigurationException) {
+                    message(ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice)
+                }
+                false
+            }
+        }
 
         private fun row(label: String, click: () -> Unit) = Preference(context).apply {
             title = label
@@ -406,6 +427,10 @@ class JellyfinXun :
             libraries.summary = libraries.entry ?: all
             libraries.isVisible = signedIn
             libraries.setEnabled(!busy && known.isNotEmpty())
+            managementAddress.text = setting(MANAGEMENT_ADDRESS)
+            managementAddress.summary = setting(MANAGEMENT_ADDRESS).ifBlank { text("使用服务器地址", "Use the server address") }
+            management.summary = text("打开 Jellyfin 控制台", "Open the Jellyfin dashboard")
+            management.setEnabled(managementPage() != null)
             diagnostic.summary = when (val code = setting(DIAGNOSTIC_CODE)) {
                 "" -> text("尚未测试或登录", "No connection result yet")
                 "OK" -> text("最近一次连接成功", "Last connection succeeded")
@@ -426,16 +451,32 @@ class JellyfinXun :
         private fun normalizeAddress(value: String): String = value.trim().takeIf(String::isNotEmpty)
             ?.let { NasConnection.parseEndpoint(it).toString().trimEnd('/') }.orEmpty()
 
-        private fun editServer(value: String) {
-            try {
-                val endpoint = normalizeAddress(value)
-                val previous = runCatching { normalizeAddress(setting(SERVER)) }.getOrDefault(setting(SERVER))
-                if (endpoint != previous) {
-                    saveConnectionChanges(text("更改服务器地址？", "Change server address?"), SERVER to endpoint)
-                }
-            } catch (error: NasConfigurationException) {
-                message(ConnectionDiagnostics.failure(LoginStage.CONFIGURATION, error, chinese).advice)
+        private fun editServer(endpoint: String) {
+            val previous = runCatching { normalizeAddress(setting(SERVER)) }.getOrDefault(setting(SERVER))
+            if (endpoint != previous) {
+                saveConnectionChanges(text("更改服务器地址？", "Change server address?"), SERVER to endpoint)
             }
+        }
+
+        private fun managementPage(): HttpUrl? = runCatching {
+            NasConnection.administrationPage(setting(MANAGEMENT_ADDRESS).ifBlank { setting(SERVER) })
+        }.getOrNull()
+
+        private fun openManagement() {
+            val page = managementPage() ?: return
+            val hostWebView = Intent().setClassName(context.packageName, "eu.kanade.tachiyomi.ui.webview.WebViewActivity")
+                .putExtra("url_key", page.toString())
+                .putExtra("title_key", text("Jellyfin 管理后台", "Jellyfin dashboard"))
+            val systemBrowser = Intent(Intent.ACTION_VIEW, Uri.parse(page.toString()))
+            for (intent in listOf(hostWebView, systemBrowser)) {
+                try {
+                    context.startActivity(intent)
+                    return
+                } catch (_: ActivityNotFoundException) {
+                } catch (_: SecurityException) {
+                }
+            }
+            message(text("无法打开 Jellyfin 管理后台", "Could not open the Jellyfin dashboard"))
         }
 
         private fun openAccount() {
@@ -794,6 +835,7 @@ class JellyfinXun :
     companion object {
         private const val PAGE_SIZE = 40
         private const val SERVER = "nas_server"
+        private const val MANAGEMENT_ADDRESS = "nas_management_address"
         private const val CA = "nas_ca_pem"
         private const val FINGERPRINT = "nas_ca_sha256"
         private const val USERNAME = "nas_username"
