@@ -16,7 +16,7 @@ APK 直接下载：[`repo` 分支](https://github.com/Xun2202/xun-anime-extensio
 
 ## 扩展列表
 
-### Jellyfin Xun — `src/all/jellyfinxun`（v5，APK 14.5）
+### Jellyfin Xun — `src/all/jellyfinxun`（v6，APK 14.6）
 
 通过 HTTPS 连接自己的 Jellyfin。用普通播放账号浏览、搜索和原画播放，支持系统信任的证书和私有 CA。设置界面支持中文和英文。配置、限制与测试见 [使用说明](src/all/jellyfinxun/README.md)。
 

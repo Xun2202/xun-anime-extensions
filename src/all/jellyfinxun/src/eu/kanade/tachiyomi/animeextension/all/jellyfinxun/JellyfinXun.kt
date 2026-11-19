@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.all.jellyfinxun
 
+import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.DialogInterface
@@ -11,13 +12,11 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.widget.AppCompatEditText
-import androidx.appcompat.widget.AppCompatRadioButton
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceCategory
@@ -294,6 +293,9 @@ class JellyfinXun :
     private inner class Settings(private val screen: PreferenceScreen) {
         private val context = screen.context
         private val chinese = context.resources.configuration.locales[0].language == "zh"
+
+        // Host builds can remove unused AppCompat methods during optimization.
+        // Framework widgets stay available when this extension is loaded into a host app.
         private val dialogContext by lazy { AlertDialog.Builder(context).context }
 
         private val server = row(text("服务器地址", "Server address"), ::editServer)
@@ -659,7 +661,7 @@ class JellyfinXun :
         }
 
         private fun trustOption(group: RadioGroup, label: String): Int {
-            val button = AppCompatRadioButton(dialogContext).apply {
+            val button = RadioButton(dialogContext).apply {
                 id = View.generateViewId()
                 text = label
                 minHeight = dp(48)
@@ -676,7 +678,7 @@ class JellyfinXun :
             placeholder: String? = null,
             multiline: Boolean = false,
         ): EditText {
-            val input = AppCompatEditText(dialogContext).apply {
+            val input = EditText(dialogContext).apply {
                 id = View.generateViewId()
                 if (!multiline) setSingleLine(true)
                 inputType = type
